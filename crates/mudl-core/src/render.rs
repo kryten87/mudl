@@ -40,6 +40,38 @@ pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
     renderer.out
 }
 
+// ---------------------------------------------------------------------
+// Down mode: raw-source view
+// ---------------------------------------------------------------------
+
+/// Renders `markdown` to Down-mode HTML: the raw-source view, one
+/// `<div class="line" data-line="N">` per source line (1-indexed), each
+/// line HTML-escaped.
+///
+/// Deliberately trivial — a `str::lines()` split, not a `pulldown-cmark`
+/// walk. Down mode has no need for an event-stream visitor the way
+/// `render_up` does: syntax highlighting is applied client-side (see the
+/// implementation plan's §4), so there's no server-side span-tracking to
+/// do here, and Rust string slicing never lets a highlighted span cross
+/// a newline the way `mud`'s `HTMLLineSplitter` had to account for.
+/// Visual line numbering is CSS-driven from the `data-line` attribute,
+/// matching `mud`'s approach — this function only emits the attribute,
+/// not rendered number text.
+///
+/// `options` is accepted for API symmetry with `render_up` (and in case
+/// a later phase needs it) but is currently unused by Down mode.
+pub fn render_down(markdown: &str, _options: &RenderOptions) -> String {
+    let mut out = String::new();
+    for (index, line) in markdown.lines().enumerate() {
+        out.push_str("<div class=\"line\" data-line=\"");
+        out.push_str(&(index + 1).to_string());
+        out.push_str("\">");
+        out.push_str(&html_escape(line));
+        out.push_str("</div>");
+    }
+    out
+}
+
 struct Renderer<'a> {
     events: &'a [(Event<'a>, Range<usize>)],
     pos: usize,
@@ -1190,5 +1222,79 @@ mod tests {
                 "<p><a href=\"mailto:jane@example.com\">jane@example.com</a></p>\n"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Down mode tests
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+mod down_tests {
+    use super::*;
+
+    fn render(markdown: &str) -> String {
+        render_down(markdown, &RenderOptions::default())
+    }
+
+    #[test]
+    fn empty_document_yields_no_line_divs() {
+        assert_eq!(render(""), "");
+    }
+
+    #[test]
+    fn single_line() {
+        assert_eq!(
+            render("hello world"),
+            "<div class=\"line\" data-line=\"1\">hello world</div>"
+        );
+    }
+
+    #[test]
+    fn no_trailing_newline_does_not_add_a_phantom_empty_line() {
+        assert_eq!(
+            render("first\nsecond"),
+            "<div class=\"line\" data-line=\"1\">first</div>\
+             <div class=\"line\" data-line=\"2\">second</div>"
+        );
+    }
+
+    #[test]
+    fn trailing_newline_does_not_add_a_phantom_empty_line_either() {
+        // A single trailing `\n` is just line termination, not a third
+        // (empty) line — `str::lines()` already gives us this for free,
+        // but it's worth pinning down explicitly since it's exactly the
+        // "phantom trailing line" bug this step's plan calls out.
+        assert_eq!(render("first\nsecond"), render("first\nsecond\n"));
+    }
+
+    #[test]
+    fn multiple_blank_lines_are_each_preserved_and_numbered() {
+        assert_eq!(
+            render("a\n\n\nb"),
+            "<div class=\"line\" data-line=\"1\">a</div>\
+             <div class=\"line\" data-line=\"2\"></div>\
+             <div class=\"line\" data-line=\"3\"></div>\
+             <div class=\"line\" data-line=\"4\">b</div>"
+        );
+    }
+
+    #[test]
+    fn special_characters_are_escaped_exactly_once() {
+        assert_eq!(
+            render("<b>Tom & Jerry</b>"),
+            "<div class=\"line\" data-line=\"1\">&lt;b&gt;Tom &amp; Jerry&lt;/b&gt;</div>"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_already_html_escaped_text_is_escaped_again() {
+        // Matches `html_escape`'s own documented behavior (no smart
+        // double-escape detection) — `render_down` doesn't add any
+        // special-casing on top of it.
+        assert_eq!(
+            render("&amp;"),
+            "<div class=\"line\" data-line=\"1\">&amp;amp;</div>"
+        );
     }
 }
