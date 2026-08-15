@@ -10,6 +10,7 @@ pub mod options;
 pub mod parse;
 pub mod render;
 pub mod slug;
+pub mod template;
 
 #[cfg(test)]
 mod tests {

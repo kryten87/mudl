@@ -16,6 +16,12 @@ pub struct RenderOptions {
     /// regardless of this setting — matches `mud`'s `AlertDetector`, where
     /// `docCAlertMode` gates only the DocC-aside path.
     pub doc_c_alert_mode: DocCAlertMode,
+
+    /// `true` for a self-contained export (e.g. `--standalone`), `false` for
+    /// the live, interactive app view. Gates interactive-only features such
+    /// as the Find-feature CSS (see `template::select_assets`). Defaults to
+    /// `false`, matching `mud`'s `RenderOptions.standalone` default.
+    pub standalone: bool,
 }
 
 #[cfg(test)]
@@ -28,5 +34,10 @@ mod tests {
             RenderOptions::default().doc_c_alert_mode,
             DocCAlertMode::Extended
         );
+    }
+
+    #[test]
+    fn default_standalone_is_false() {
+        assert!(!RenderOptions::default().standalone);
     }
 }
