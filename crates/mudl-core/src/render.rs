@@ -961,6 +961,7 @@ mod tests {
         fn off_mode_renders_plain_blockquote() {
             let options = RenderOptions {
                 doc_c_alert_mode: DocCAlertMode::Off,
+                ..Default::default()
             };
             assert_eq!(
                 render_up("> Note: Body text.", &options),
@@ -972,6 +973,7 @@ mod tests {
         fn common_mode_excludes_extended_aliases() {
             let options = RenderOptions {
                 doc_c_alert_mode: DocCAlertMode::Common,
+                ..Default::default()
             };
             assert_eq!(
                 render_up("> Bug: Something broke.", &options),

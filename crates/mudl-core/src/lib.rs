@@ -11,6 +11,7 @@ pub mod parse;
 pub mod render;
 pub mod resources;
 pub mod slug;
+pub mod template;
 
 #[cfg(test)]
 mod tests {
