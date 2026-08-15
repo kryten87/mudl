@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mudl-core",
+    "crates/mudl-config",
+    "crates/mudl-watch",
+    "crates/mudl-server",
+    "crates/mudl-cli",
+    "crates/mudl-gui",
+]
+
+[workspace.package]
+edition = "2021"

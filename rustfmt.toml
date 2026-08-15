@@ -1,0 +1,15 @@
+# rustfmt configuration for mudl.
+#
+# Deliberately minimal: default rustfmt style is already well-suited to this
+# project, and stable rustfmt only exposes a small subset of options outside
+# nightly, so we don't fight it. The two settings below are explicit pins
+# rather than accidents of default, everything else is left at rustfmt's
+# built-in defaults.
+
+edition = "2021"    # match [workspace.package] edition = "2021"; keeps 2021-specific
+                     # formatting rules (e.g. disjoint closure captures) active.
+use_small_heuristics = "Default"  # explicit, not implicit: keep the default
+                                   # line-collapsing heuristics rather than
+                                   # "Max" (which can produce very dense
+                                   # single-line items) or "Off" (which can
+                                   # produce noisy vertical sprawl).
