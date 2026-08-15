@@ -8,6 +8,6 @@ licenses rather than `mudl`'s. In particular, `mud` vendors:
 - [Mermaid](https://mermaid.js.org/) (MIT) — diagram rendering
 - [Temml](https://temml.org/) (MIT) — TeX-to-MathML math rendering
 
-`mudl` will carry these over unchanged (Phase 3, step 3.5), including their
-license notices, into `mudl/resources/js/`. See `LICENSE.md` for `mudl`'s
+`mudl` carries these over unchanged (Phase 3, step 3.5), including their
+license notices, in `mudl/resources/js/`. See `LICENSE.md` for `mudl`'s
 own license.

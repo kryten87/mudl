@@ -9,6 +9,7 @@ pub mod images;
 pub mod options;
 pub mod parse;
 pub mod render;
+pub mod resources;
 pub mod slug;
 
 #[cfg(test)]
