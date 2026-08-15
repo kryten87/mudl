@@ -20,6 +20,14 @@ pub enum DocCAlertMode {
     Extended,
 }
 
+impl Default for DocCAlertMode {
+    /// Matches `mud`'s documented default (`markdownDocCAlertMode` = `extended`,
+    /// see Appendix B of the implementation plan).
+    fn default() -> Self {
+        DocCAlertMode::Extended
+    }
+}
+
 const GFM_ALERT_TAGS: &[(&str, AlertCategory)] = &[
     ("[!NOTE]", AlertCategory::Note),
     ("[!TIP]", AlertCategory::Tip),
@@ -398,5 +406,15 @@ mod pipeline_tests {
     #[test]
     fn tagless_quote_never_reaches_detection() {
         assert_eq!(parse_aside_tag("Plain quote, no tag."), None);
+    }
+}
+
+#[cfg(test)]
+mod doc_c_alert_mode_default_tests {
+    use super::DocCAlertMode;
+
+    #[test]
+    fn default_is_extended() {
+        assert_eq!(DocCAlertMode::default(), DocCAlertMode::Extended);
     }
 }

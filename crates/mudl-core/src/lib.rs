@@ -4,6 +4,9 @@ pub mod encoding;
 pub mod footnotes;
 pub mod frontmatter;
 pub mod images;
+pub mod options;
+pub mod parse;
+pub mod render;
 pub mod slug;
 
 #[cfg(test)]
