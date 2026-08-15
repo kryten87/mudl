@@ -3,6 +3,7 @@ pub mod emoji;
 pub mod encoding;
 pub mod footnotes;
 pub mod frontmatter;
+pub mod frontmatter_html;
 pub mod images;
 pub mod options;
 pub mod parse;
