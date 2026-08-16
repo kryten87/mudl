@@ -5,7 +5,10 @@
 //! builder rather than a line-for-line translation — see `HtmlDocument`'s doc
 //! comment and `Script` below for where this deliberately diverges.
 
+use std::path::Path;
+
 use crate::encoding::html_escape;
+use crate::images::is_external_source;
 use crate::options::RenderOptions;
 
 /// A single `<script>` tag to place just before `</body>`.
@@ -220,6 +223,104 @@ pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection
         stylesheets,
         scripts,
     }
+}
+
+/// Rewrites relative image `src` attributes in rendered HTML so the
+/// served-document path (Phase 5, step 5.2 of the implementation plan) can
+/// resolve them through `mudl-server`'s `/local/<percent-encoded-path>`
+/// route rather than as bare filesystem paths a browser could never load.
+///
+/// This is a lightweight text scan for `<img ...src="...">`-style tags, not
+/// a full HTML parser — matching the "hand-rolled but correct" level this
+/// codebase already uses for string-level transforms (see `html_escape`).
+/// Only the `src` attribute's value is touched; every other attribute on the
+/// tag, and everything outside `<img>` tags, passes through untouched.
+///
+/// External sources (per [`crate::images::is_external_source`]) are left
+/// alone. Everything else is resolved against `base_dir` the same way
+/// [`crate::images::classify`] does (`base_dir.join(src)`, so an already-
+/// absolute `src` simply replaces `base_dir` per `Path::join`'s standard
+/// behavior), then percent-encoded and rewritten to `/local/<encoded>`.
+pub fn rewrite_local_image_srcs(html: &str, base_dir: &Path) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+
+    while let Some(tag_start) = rest.find("<img") {
+        out.push_str(&rest[..tag_start]);
+        let from_tag = &rest[tag_start..];
+
+        match from_tag.find('>') {
+            Some(close_rel) => {
+                let tag_end = close_rel + 1;
+                out.push_str(&rewrite_img_tag(&from_tag[..tag_end], base_dir));
+                rest = &from_tag[tag_end..];
+            }
+            None => {
+                // No closing `>` — malformed/truncated input. Nothing left
+                // to safely rewrite; pass the remainder through untouched.
+                out.push_str(from_tag);
+                rest = "";
+            }
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// Rewrites the `src="..."` attribute value (if any) within a single
+/// already-isolated `<img ...>` tag; everything else in `tag` is copied
+/// verbatim.
+fn rewrite_img_tag(tag: &str, base_dir: &Path) -> String {
+    const NEEDLE: &str = "src=\"";
+
+    let Some(attr_start) = tag.find(NEEDLE) else {
+        return tag.to_string();
+    };
+    let value_start = attr_start + NEEDLE.len();
+    let Some(value_len) = tag[value_start..].find('"') else {
+        return tag.to_string();
+    };
+
+    let src = &tag[value_start..value_start + value_len];
+    let rewritten = rewrite_src(src, base_dir);
+
+    format!(
+        "{}{}{}",
+        &tag[..value_start],
+        rewritten,
+        &tag[value_start + value_len..]
+    )
+}
+
+/// Rewrites a single `src` value: external sources pass through unchanged;
+/// everything else becomes `/local/<percent-encoded-absolute-path>`.
+fn rewrite_src(src: &str, base_dir: &Path) -> String {
+    if is_external_source(src) {
+        return src.to_string();
+    }
+
+    let resolved = base_dir.join(src);
+    format!("/local/{}", percent_encode(&resolved.to_string_lossy()))
+}
+
+/// A minimal RFC 3986 percent-encoder: bytes in the "unreserved" set
+/// (`A-Za-z0-9-._~`) plus `/` (kept literal so the encoded path stays
+/// legible and so `mudl-server`'s `routes::dispatch` — which only strips
+/// the `/local/` prefix before percent-decoding the remainder — sees a
+/// normal-looking path) pass through unchanged; every other byte is
+/// escaped as `%XX` (uppercase hex).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(*byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -546,5 +647,96 @@ mod select_assets_tests {
         let selection = select_assets("", &options(true));
         let last_two = &selection.stylesheets[selection.stylesheets.len() - 2..];
         assert_eq!(last_two, ["mud-narrow.css", "mud-print.css"]);
+    }
+}
+
+#[cfg(test)]
+mod rewrite_local_image_srcs_tests {
+    use super::rewrite_local_image_srcs;
+    use std::path::Path;
+
+    #[test]
+    fn relative_src_is_rewritten_to_local_route() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="photo.png">"#;
+        assert_eq!(
+            rewrite_local_image_srcs(html, base),
+            "<img src=\"/local//base/dir/photo.png\">"
+        );
+    }
+
+    #[test]
+    fn http_src_is_left_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="http://example.com/photo.png">"#;
+        assert_eq!(rewrite_local_image_srcs(html, base), html);
+    }
+
+    #[test]
+    fn https_src_is_left_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="https://example.com/photo.png">"#;
+        assert_eq!(rewrite_local_image_srcs(html, base), html);
+    }
+
+    #[test]
+    fn data_uri_src_is_left_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="data:image/png;base64,abc">"#;
+        assert_eq!(rewrite_local_image_srcs(html, base), html);
+    }
+
+    #[test]
+    fn mailto_src_is_left_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="mailto:test@example.com">"#;
+        assert_eq!(rewrite_local_image_srcs(html, base), html);
+    }
+
+    #[test]
+    fn multiple_img_tags_are_each_rewritten_independently() {
+        let base = Path::new("/base/dir");
+        let html = r#"<p><img src="a.png"> text <img src="b.png"></p>"#;
+        assert_eq!(
+            rewrite_local_image_srcs(html, base),
+            "<p><img src=\"/local//base/dir/a.png\"> text <img src=\"/local//base/dir/b.png\"></p>"
+        );
+    }
+
+    #[test]
+    fn other_attributes_are_preserved_untouched() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img alt="A photo" src="photo.png" width="100">"#;
+        assert_eq!(
+            rewrite_local_image_srcs(html, base),
+            "<img alt=\"A photo\" src=\"/local//base/dir/photo.png\" width=\"100\">"
+        );
+    }
+
+    #[test]
+    fn src_with_space_is_percent_encoded() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="my photo.png">"#;
+        assert_eq!(
+            rewrite_local_image_srcs(html, base),
+            "<img src=\"/local//base/dir/my%20photo.png\">"
+        );
+    }
+
+    #[test]
+    fn html_with_no_img_tags_is_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = "<p>No images here.</p>";
+        assert_eq!(rewrite_local_image_srcs(html, base), html);
+    }
+
+    #[test]
+    fn absolute_local_path_src_is_still_rewritten_through_local_route() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="/absolute/photo.png">"#;
+        assert_eq!(
+            rewrite_local_image_srcs(html, base),
+            "<img src=\"/local//absolute/photo.png\">"
+        );
     }
 }
