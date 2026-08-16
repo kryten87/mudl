@@ -2,15 +2,24 @@
 //! `docs/IMPLEMENTATION-PLAN.md`).
 //!
 //! This crate defines the `ChangeSource` trait (§5.2's DI boundary) and its
-//! polling implementation, `PollingChangeSource` (step 6.1), plus the
-//! `FileSystem`/`Clock` traits it's built from. Background-thread wiring
-//! (`spawn`/`WatchHandle`, step 6.2) is deliberately left for a follow-up
-//! step — only the pure, unit-testable polling logic lives here.
+//! polling implementation, `PollingChangeSource` (step 6.1), the
+//! `FileSystem`/`Clock` traits it's built from, and the background-thread
+//! wiring (`PollingChangeSource::spawn`/`WatchHandle`, step 6.2) that runs
+//! `poll()` in a loop on a dedicated thread.
+//!
+//! `mudl-watch` intentionally has no dependency on `mudl-server` (the
+//! architecture diagram in plan §2 has the dependency arrow running the
+//! other way: `mudl-server` depends on `mudl-watch`, not vice versa). That's
+//! why `spawn` takes a generic `on_change` callback rather than reaching
+//! into a `mudl_server::version::VersionCounter` directly — the caller
+//! (`mudl-server`) supplies a closure like `move |_event| version.bump()`.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 /// A single detected change to a watched file.
@@ -228,6 +237,68 @@ impl<F: FileSystem, C: Clock> ChangeSource for PollingChangeSource<F, C> {
     }
 }
 
+/// A handle to a [`PollingChangeSource`]'s background polling thread
+/// (step 6.2). Owns the `JoinHandle` and a stop flag so a caller (a test,
+/// or eventually the GUI shell on window close) can shut the thread down
+/// deterministically with [`WatchHandle::stop`] rather than leaking it.
+///
+/// Dropping a `WatchHandle` without calling `stop` signals the stop flag
+/// (so the thread will exit on its own the next time it wakes) but does
+/// *not* join it — a `Drop` impl must never block, so a forgotten handle
+/// stops the poll loop promptly without hanging whatever dropped it.
+pub struct WatchHandle {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl WatchHandle {
+    /// Signals the background thread to stop and blocks until it exits.
+    pub fn stop(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        // Signal only — joining here would block the dropping thread, which
+        // `Drop` impls must never do. A handle that's merely dropped (not
+        // explicitly `stop`ped) still stops the poll loop; it just doesn't
+        // wait around for confirmation.
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+impl<F: FileSystem + Send + 'static, C: Clock + Send + 'static> PollingChangeSource<F, C> {
+    /// Spawns this `PollingChangeSource` onto a dedicated background
+    /// thread that calls `.poll()` in a loop, sleeping `interval` between
+    /// calls (the same interval the source was constructed with — reused
+    /// here rather than taken as a separate parameter, so the two can never
+    /// desync), invoking `on_change` for every `Some(event)` `poll()`
+    /// returns.
+    pub fn spawn(mut self, on_change: impl Fn(ChangeEvent) + Send + 'static) -> WatchHandle {
+        let interval = self.interval;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                if let Some(event) = self.poll() {
+                    on_change(event);
+                }
+                std::thread::sleep(interval);
+            }
+        });
+
+        WatchHandle {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +466,49 @@ mod tests {
 
         clock.set(epoch_plus(0));
         assert_eq!(clock.now(), epoch_plus(0));
+    }
+
+    #[test]
+    fn spawn_fires_callback_on_change_and_stop_halts_the_thread() {
+        use std::sync::atomic::AtomicUsize;
+
+        let fs = InMemoryFileSystem::new();
+        fs.set("/doc.md", epoch_plus(1));
+        let interval = Duration::from_millis(5);
+        let source =
+            PollingChangeSource::new(PathBuf::from("/doc.md"), fs.clone(), RealClock, interval);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let handle = source.spawn(move |_event| {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // Give the baseline poll a moment to happen, then change the mtime
+        // and confirm the callback fires for it.
+        std::thread::sleep(interval * 4);
+        fs.set("/doc.md", epoch_plus(2));
+        std::thread::sleep(interval * 6);
+
+        let calls_before_stop = calls.load(Ordering::SeqCst);
+        assert!(
+            calls_before_stop >= 1,
+            "expected at least one callback invocation after the mtime changed"
+        );
+
+        handle.stop();
+        let calls_at_stop = calls.load(Ordering::SeqCst);
+
+        // Nothing should invoke the callback again after `stop()`, even
+        // though the file keeps "changing" underneath.
+        fs.set("/doc.md", epoch_plus(3));
+        std::thread::sleep(interval * 6);
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            calls_at_stop,
+            "callback fired again after stop()"
+        );
+        assert_eq!(calls_at_stop, calls_before_stop);
     }
 }
