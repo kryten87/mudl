@@ -1,3 +1,4 @@
+use std::io;
 use std::path::{Path, PathBuf};
 
 pub fn is_external_source(source: &str) -> bool {
@@ -34,6 +35,20 @@ pub fn classify(source: &str, base_dir: &Path) -> Option<(PathBuf, &'static str)
     let resolved = base_dir.join(source);
 
     Some((resolved, mime))
+}
+
+pub fn encode_data_uri(
+    source: &str,
+    base_dir: &Path,
+    read: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+) -> Option<String> {
+    let (path, mime) = classify(source, base_dir)?;
+    let bytes = read(&path).ok()?;
+    Some(format!(
+        "data:{};base64,{}",
+        mime,
+        crate::encoding::base64_encode(&bytes)
+    ))
 }
 
 #[cfg(test)]
@@ -181,5 +196,47 @@ mod tests {
     fn classify_data_uri_is_none() {
         let base = Path::new("/base/dir");
         assert!(classify("data:image/png;base64,abc", base).is_none());
+    }
+
+    #[test]
+    fn encode_data_uri_known_extension_with_fake_bytes() {
+        let base = Path::new("/base/dir");
+        let read = |path: &Path| -> io::Result<Vec<u8>> {
+            assert_eq!(path, base.join("photo.png"));
+            Ok(b"fo".to_vec())
+        };
+        let result = encode_data_uri("photo.png", base, &read).unwrap();
+        assert_eq!(result, "data:image/png;base64,Zm8=");
+    }
+
+    #[test]
+    fn encode_data_uri_external_source_is_none() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> { panic!("read should not be called") };
+        assert!(encode_data_uri("https://example.com/photo.png", base, &read).is_none());
+    }
+
+    #[test]
+    fn encode_data_uri_unknown_extension_short_circuits_before_read() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> { panic!("read should not be called") };
+        assert!(encode_data_uri("document.pdf", base, &read).is_none());
+    }
+
+    #[test]
+    fn encode_data_uri_read_error_is_none() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing"))
+        };
+        assert!(encode_data_uri("photo.png", base, &read).is_none());
+    }
+
+    #[test]
+    fn encode_data_uri_empty_bytes_is_valid_empty_data_uri() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> { Ok(Vec::new()) };
+        let result = encode_data_uri("photo.png", base, &read).unwrap();
+        assert_eq!(result, "data:image/png;base64,");
     }
 }
