@@ -21,5 +21,150 @@ pub enum Route {
 
 /// Maps a parsed [`Request`] to the [`Route`] it should be served by.
 pub fn dispatch(req: &Request) -> Route {
-    todo!("Phase 4.4: {req:?}")
+    match req.path.as_str() {
+        "/" => Route::Document,
+        "/wait" => match parse_since(req.query.get("since")) {
+            Some(since) => Route::WaitForChange(since),
+            None => Route::NotFound,
+        },
+        path => {
+            if let Some(name) = path.strip_prefix("/assets/") {
+                if name.is_empty() {
+                    Route::NotFound
+                } else {
+                    Route::Asset(name.to_string())
+                }
+            } else if let Some(encoded) = path.strip_prefix("/local/") {
+                if encoded.is_empty() {
+                    Route::NotFound
+                } else {
+                    match percent_decode(encoded) {
+                        Some(decoded) => Route::LocalFile(decoded),
+                        None => Route::NotFound,
+                    }
+                }
+            } else {
+                Route::NotFound
+            }
+        }
+    }
+}
+
+/// `None` (missing param) defaults to `Some(0)`; a present-but-unparseable
+/// value is treated as malformed, not silently defaulted.
+fn parse_since(raw: Option<&String>) -> Option<u64> {
+    match raw {
+        None => Some(0),
+        Some(s) => s.parse::<u64>().ok(),
+    }
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = bytes.get(i + 1..i + 3)?;
+                let hex_str = std::str::from_utf8(hex).ok()?;
+                out.push(u8::from_str_radix(hex_str, 16).ok()?);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::Method;
+
+    fn req(path: &str, query: &[(&str, &str)]) -> Request {
+        Request {
+            method: Method::Get,
+            path: path.to_string(),
+            query: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn root_is_document() {
+        assert_eq!(dispatch(&req("/", &[])), Route::Document);
+    }
+
+    #[test]
+    fn assets_path_is_asset_route() {
+        assert_eq!(
+            dispatch(&req("/assets/mud.css", &[])),
+            Route::Asset("mud.css".to_string())
+        );
+    }
+
+    #[test]
+    fn assets_path_with_empty_name_is_not_found() {
+        assert_eq!(dispatch(&req("/assets/", &[])), Route::NotFound);
+    }
+
+    #[test]
+    fn local_path_is_percent_decoded() {
+        assert_eq!(
+            dispatch(&req("/local/%2Fhome%2Fuser%2Fnotes.md", &[])),
+            Route::LocalFile("/home/user/notes.md".to_string())
+        );
+    }
+
+    #[test]
+    fn local_path_missing_segment_is_not_found() {
+        assert_eq!(dispatch(&req("/local/", &[])), Route::NotFound);
+    }
+
+    #[test]
+    fn local_path_invalid_percent_encoding_is_not_found() {
+        assert_eq!(dispatch(&req("/local/%zz", &[])), Route::NotFound);
+    }
+
+    #[test]
+    fn local_path_truncated_percent_encoding_is_not_found() {
+        assert_eq!(dispatch(&req("/local/abc%2", &[])), Route::NotFound);
+    }
+
+    #[test]
+    fn wait_with_since_is_wait_for_change() {
+        assert_eq!(
+            dispatch(&req("/wait", &[("since", "42")])),
+            Route::WaitForChange(42)
+        );
+    }
+
+    #[test]
+    fn wait_without_since_defaults_to_zero() {
+        assert_eq!(dispatch(&req("/wait", &[])), Route::WaitForChange(0));
+    }
+
+    #[test]
+    fn wait_with_unparseable_since_is_not_found() {
+        assert_eq!(
+            dispatch(&req("/wait", &[("since", "not-a-number")])),
+            Route::NotFound
+        );
+    }
+
+    #[test]
+    fn wait_with_negative_since_is_not_found() {
+        assert_eq!(dispatch(&req("/wait", &[("since", "-1")])), Route::NotFound);
+    }
+
+    #[test]
+    fn unknown_path_is_not_found() {
+        assert_eq!(dispatch(&req("/nonexistent", &[])), Route::NotFound);
+    }
 }
