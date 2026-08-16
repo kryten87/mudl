@@ -5,9 +5,11 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use mudl_server::fs::{FileSystem, InMemoryFileSystem};
 use mudl_server::version::VersionCounter;
 
 /// Binds the server to `127.0.0.1:0`, spawns its accept loop on a
@@ -15,11 +17,17 @@ use mudl_server::version::VersionCounter;
 /// along with the `VersionCounter` it was wired up with, so a test can bump
 /// it programmatically.
 fn start_server() -> (SocketAddr, VersionCounter) {
+    start_server_with_fs(Arc::new(InMemoryFileSystem::new()))
+}
+
+/// Same as `start_server`, but with a caller-supplied filesystem, for tests
+/// that exercise `/local/<path>` against known fake contents.
+fn start_server_with_fs(filesystem: Arc<dyn FileSystem>) -> (SocketAddr, VersionCounter) {
     let listener = mudl_server::server::bind().expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read local addr");
     let version = VersionCounter::new();
     let server_version = version.clone();
-    thread::spawn(move || mudl_server::server::serve(listener, server_version));
+    thread::spawn(move || mudl_server::server::serve(listener, server_version, filesystem));
     (addr, version)
 }
 
@@ -109,6 +117,30 @@ fn document_route_is_a_placeholder_response_not_a_hang() {
     let (head, _body) = split_head_and_body(&response);
 
     assert!(head.starts_with("HTTP/1.1 501"));
+}
+
+#[test]
+fn local_file_route_serves_bytes_present_in_the_filesystem() {
+    let filesystem = InMemoryFileSystem::new();
+    filesystem.insert("/tmp/notes/photo.png", b"fake-png-bytes".to_vec());
+    let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
+
+    let response = get(addr, "/local/%2Ftmp%2Fnotes%2Fphoto.png");
+    let (head, body) = split_head_and_body(&response);
+
+    assert!(head.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(header_value(&head, "Content-Type"), Some("image/png"));
+    assert_eq!(body, b"fake-png-bytes");
+}
+
+#[test]
+fn local_file_route_missing_from_filesystem_is_404() {
+    let (addr, _version) = start_server();
+
+    let response = get(addr, "/local/%2Ftmp%2Fmissing.md");
+    let (head, _body) = split_head_and_body(&response);
+
+    assert!(head.starts_with("HTTP/1.1 404 Not Found"));
 }
 
 #[test]
