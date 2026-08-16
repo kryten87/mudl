@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 mudl-core = { path = "../mudl-core" }
+mudl-watch = { path = "../mudl-watch" }
