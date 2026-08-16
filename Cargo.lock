@@ -36,6 +36,9 @@ version = "0.1.0"
 [[package]]
 name = "mudl-server"
 version = "0.1.0"
+dependencies = [
+ "mudl-core",
+]
 
 [[package]]
 name = "mudl-watch"
