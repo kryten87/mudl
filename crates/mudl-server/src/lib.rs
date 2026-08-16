@@ -1,3 +1,7 @@
+pub mod http;
+pub mod mime;
+pub mod routes;
+
 #[cfg(test)]
 mod tests {
     #[test]
