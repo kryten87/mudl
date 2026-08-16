@@ -3,6 +3,7 @@ pub mod http;
 pub mod mime;
 pub mod routes;
 pub mod server;
+pub mod version;
 
 #[cfg(test)]
 mod tests {

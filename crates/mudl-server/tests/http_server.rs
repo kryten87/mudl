@@ -6,15 +6,21 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use mudl_server::version::VersionCounter;
 
 /// Binds the server to `127.0.0.1:0`, spawns its accept loop on a
-/// background thread, and returns the address it ended up listening on.
-fn start_server() -> SocketAddr {
+/// background thread, and returns the address it ended up listening on
+/// along with the `VersionCounter` it was wired up with, so a test can bump
+/// it programmatically.
+fn start_server() -> (SocketAddr, VersionCounter) {
     let listener = mudl_server::server::bind().expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read local addr");
-    thread::spawn(move || mudl_server::server::serve(listener));
-    addr
+    let version = VersionCounter::new();
+    let server_version = version.clone();
+    thread::spawn(move || mudl_server::server::serve(listener, server_version));
+    (addr, version)
 }
 
 /// Sends a raw `GET <path> HTTP/1.1` request and returns the full response
@@ -69,7 +75,7 @@ fn split_head_and_body(response: &[u8]) -> (String, &[u8]) {
 
 #[test]
 fn known_asset_is_served_with_its_embedded_content() {
-    let addr = start_server();
+    let (addr, _version) = start_server();
     let response = get(addr, "/assets/mud.css");
     let (head, body) = split_head_and_body(&response);
 
@@ -80,7 +86,7 @@ fn known_asset_is_served_with_its_embedded_content() {
 
 #[test]
 fn unknown_route_is_404() {
-    let addr = start_server();
+    let (addr, _version) = start_server();
     let response = get(addr, "/this-does-not-exist");
     let (head, _body) = split_head_and_body(&response);
 
@@ -89,7 +95,7 @@ fn unknown_route_is_404() {
 
 #[test]
 fn unknown_asset_name_is_404() {
-    let addr = start_server();
+    let (addr, _version) = start_server();
     let response = get(addr, "/assets/does-not-exist.css");
     let (head, _body) = split_head_and_body(&response);
 
@@ -98,7 +104,7 @@ fn unknown_asset_name_is_404() {
 
 #[test]
 fn document_route_is_a_placeholder_response_not_a_hang() {
-    let addr = start_server();
+    let (addr, _version) = start_server();
     let response = get(addr, "/");
     let (head, _body) = split_head_and_body(&response);
 
@@ -106,10 +112,43 @@ fn document_route_is_a_placeholder_response_not_a_hang() {
 }
 
 #[test]
-fn wait_route_does_not_hang_before_phase_4_6() {
-    let addr = start_server();
-    let response = get(addr, "/wait?since=0");
-    let (head, _body) = split_head_and_body(&response);
+fn wait_route_unblocks_promptly_when_version_bumped() {
+    let (addr, version) = start_server();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(20));
+        version.bump();
+    });
 
-    assert!(head.starts_with("HTTP/1.1 404 Not Found"));
+    let start = Instant::now();
+    let response = get(addr, "/wait?since=0");
+    let (head, body) = split_head_and_body(&response);
+
+    assert!(
+        start.elapsed() < Duration::from_millis(400),
+        "long-poll took {:?}, expected it to unblock promptly on bump",
+        start.elapsed()
+    );
+    assert!(head.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(
+        header_value(&head, "Content-Type"),
+        Some("application/json")
+    );
+    assert_eq!(body, br#"{"version":1}"#);
+}
+
+#[test]
+fn wait_route_times_out_with_unchanged_version() {
+    let (addr, _version) = start_server();
+
+    let start = Instant::now();
+    let response = get(addr, "/wait?since=0");
+    let (head, body) = split_head_and_body(&response);
+
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "long-poll timeout took {:?}, expected it to stay under a second",
+        start.elapsed()
+    );
+    assert!(head.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(body, br#"{"version":0}"#);
 }
