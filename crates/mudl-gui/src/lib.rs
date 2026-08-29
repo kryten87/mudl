@@ -2,6 +2,7 @@
 //! `docs/IMPLEMENTATION-PLAN.md`).
 
 mod config;
+mod find;
 mod sidebar;
 mod toggle;
 mod toolbar;

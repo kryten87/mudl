@@ -32,6 +32,7 @@ use mudl_server::routes::Mode;
 use mudl_server::server::{self, DocumentSource};
 use mudl_server::version::VersionCounter;
 
+use crate::find;
 use crate::sidebar;
 use crate::toggle::next_mode;
 use crate::toolbar;
@@ -159,12 +160,29 @@ fn build_window(
     };
     let toolbar_widget = toolbar::build(&toolbar_ctx);
 
+    let (overlay, find_bar) = find::build(&paned, &webview);
+    connect_find_shortcut(&window, find_bar);
+
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     vbox.pack_start(&toolbar_widget, false, false, 0);
-    vbox.pack_start(&paned, true, true, 0);
+    vbox.pack_start(&overlay, true, true, 0);
 
     window.add(&vbox);
     window.show_all();
+}
+
+/// Ctrl+F shows and focuses the find bar; WebKit2GTK's own
+/// `WebKitFindController` handles everything else (Phase 10.5).
+fn connect_find_shortcut(window: &gtk::ApplicationWindow, find_bar: find::FindBar) {
+    window.connect_key_press_event(move |_window, event| {
+        let ctrl_f = event.state().contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            && event.keyval() == gtk::gdk::keys::constants::f;
+        if ctrl_f {
+            find_bar.show();
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
+    });
 }
 
 /// After every finished page load, scrolls to whatever fraction was
