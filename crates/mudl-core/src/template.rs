@@ -204,11 +204,14 @@ pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection
         scripts.push("mud-down.js");
     }
 
-    // A `<math>` element, a `mud-math-block` div (present even when the
+    // A `language-math` fenced code block (what `render_up` actually emits
+    // server-side for a ```math fence — Temml hasn't run yet at this point),
+    // a `<math>` element, a `mud-math-block` div (present even when the
     // renderer emits escaped-TeX fallback), or a `temml-error` span from
     // invalid TeX — any of these means the document needs math styles and
     // Temml's client-side initializer.
-    if body_html.contains("<math")
+    if body_html.contains("language-math")
+        || body_html.contains("<math")
         || body_html.contains("mud-math-block")
         || body_html.contains("temml-error")
     {
@@ -720,6 +723,25 @@ mod select_assets_tests {
         let selection = select_assets("<math></math>", &options(true));
         assert!(selection.scripts.contains(&"temml.min.js"));
         assert!(selection.scripts.contains(&"math-init.js"));
+    }
+
+    #[test]
+    fn math_fence_also_selects_temml_and_math_init_scripts() {
+        let selection = select_assets(
+            "<pre><code class=\"language-math\">x^2</code></pre>",
+            &options(true),
+        );
+        assert!(selection.scripts.contains(&"temml.min.js"));
+        assert!(selection.scripts.contains(&"math-init.js"));
+    }
+
+    #[test]
+    fn math_fence_class_triggers_math_css() {
+        let selection = select_assets(
+            "<pre><code class=\"language-math\">x^2</code></pre>",
+            &options(true),
+        );
+        assert!(selection.stylesheets.contains(&"mud-math.css"));
     }
 
     #[test]
