@@ -7,7 +7,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_mudl-cli")
+    env!("CARGO_BIN_EXE_mudl")
 }
 
 fn write_temp_md(name: &str, contents: &str) -> std::path::PathBuf {

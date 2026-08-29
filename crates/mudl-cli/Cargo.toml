@@ -2,6 +2,16 @@
 name = "mudl-cli"
 version = "0.1.0"
 edition.workspace = true
+description = "A Perfect Markdown Viewer"
+license = "MIT"
+
+# The crate is `mudl-cli` (matching the workspace's per-crate naming
+# convention), but the shipped binary is plain `mudl` — that's the name
+# users type, the desktop entry's Exec=, and the CLI installer's symlink
+# target (see Phase 11.1/11.2).
+[[bin]]
+name = "mudl"
+path = "src/main.rs"
 
 [dependencies]
 mudl-core = { path = "../mudl-core" }
