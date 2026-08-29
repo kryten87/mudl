@@ -319,7 +319,7 @@ fn rewrite_src(src: &str, base_dir: &Path) -> String {
 /// the `/local/` prefix before percent-decoding the remainder — sees a
 /// normal-looking path) pass through unchanged; every other byte is
 /// escaped as `%XX` (uppercase hex).
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.as_bytes() {
         match byte {

@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod emoji;
 pub mod encoding;
+pub mod folder;
 pub mod footnotes;
 pub mod frontmatter;
 pub mod frontmatter_html;
