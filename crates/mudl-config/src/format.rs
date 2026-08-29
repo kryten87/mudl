@@ -40,9 +40,31 @@ pub fn parse(text: &str) -> Vec<(String, String)> {
     entries
 }
 
+/// Serializes `entries` back into the `key = value` text format `parse`
+/// understands — the round-trip partner of [`parse`].
+///
+/// Each entry becomes its own `key = value` line, in the given order, with
+/// no escaping: neither `=` nor `#` needs quoting because of how `parse`
+/// treats them positionally rather than lexically. `=` only ever splits on
+/// its *first* occurrence, so any `=` in `value` survives untouched. `#`
+/// only starts a comment when it is the first non-whitespace character of
+/// the *entire* line, so a `#` inside `value` (anywhere after `key = `) is
+/// never mistaken for one — this holds as long as `key` itself never
+/// starts with `#`, which preference keys never do.
+pub fn serialize(entries: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (key, value) in entries {
+        out.push_str(key);
+        out.push_str(" = ");
+        out.push_str(value);
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{parse, serialize};
 
     #[test]
     fn empty_file() {
@@ -145,5 +167,67 @@ mod tests {
     #[test]
     fn line_with_only_equals_yields_empty_key_and_value() {
         assert_eq!(parse("="), vec![(String::new(), String::new())]);
+    }
+
+    fn round_trips(entries: Vec<(String, String)>) {
+        assert_eq!(parse(&serialize(&entries)), entries);
+    }
+
+    #[test]
+    fn serialize_empty_entries_is_empty_string() {
+        assert_eq!(serialize(&[]), "");
+    }
+
+    #[test]
+    fn serialize_single_entry() {
+        assert_eq!(
+            serialize(&[("theme".to_string(), "earthy".to_string())]),
+            "theme = earthy\n"
+        );
+    }
+
+    #[test]
+    fn round_trip_empty_entries() {
+        round_trips(vec![]);
+    }
+
+    #[test]
+    fn round_trip_single_entry() {
+        round_trips(vec![("theme".to_string(), "earthy".to_string())]);
+    }
+
+    #[test]
+    fn round_trip_multiple_entries_preserves_order() {
+        round_trips(vec![
+            ("theme".to_string(), "earthy".to_string()),
+            ("lighting".to_string(), "dark".to_string()),
+            ("folder_open_behavior".to_string(), "tabs".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn round_trip_value_containing_equals() {
+        round_trips(vec![("custom_command".to_string(), "a=b=c".to_string())]);
+    }
+
+    #[test]
+    fn round_trip_value_containing_hash() {
+        round_trips(vec![(
+            "status_label".to_string(),
+            "#not-a-comment".to_string(),
+        )]);
+    }
+
+    #[test]
+    fn round_trip_value_containing_both_equals_and_hash() {
+        round_trips(vec![(
+            "custom_command".to_string(),
+            "a=b #note".to_string(),
+        )]);
+    }
+
+    #[test]
+    fn round_trip_empty_value() {
+        round_trips(vec![("theme".to_string(), String::new())]);
     }
 }
