@@ -8,6 +8,7 @@
 //! re-implemented.
 
 mod lcs;
+pub mod pairing;
 pub mod word;
 
 #[cfg(test)]
