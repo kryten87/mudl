@@ -69,7 +69,10 @@ mod tests {
 
     #[test]
     fn own_root_is_default() {
-        assert_eq!(classify("http://127.0.0.1:53211/", ADDR), LinkAction::Default);
+        assert_eq!(
+            classify("http://127.0.0.1:53211/", ADDR),
+            LinkAction::Default
+        );
     }
 
     #[test]
@@ -99,7 +102,10 @@ mod tests {
     #[test]
     fn local_md_route_opens_new_window() {
         assert_eq!(
-            classify("http://127.0.0.1:53211/local-md/%2Fhome%2Fuser%2Fstub.md", ADDR),
+            classify(
+                "http://127.0.0.1:53211/local-md/%2Fhome%2Fuser%2Fstub.md",
+                ADDR
+            ),
             LinkAction::OpenNewWindow(PathBuf::from("/home/user/stub.md"))
         );
     }

@@ -32,8 +32,7 @@ use std::thread;
 use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::{
-    NavigationPolicyDecisionExt, PolicyDecisionExt, PolicyDecisionType, URIRequestExt,
-    WebViewExt,
+    NavigationPolicyDecisionExt, PolicyDecisionExt, PolicyDecisionType, URIRequestExt, WebViewExt,
 };
 
 use mudl_config::Preferences;
@@ -486,8 +485,7 @@ fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr, regi
         if decision_type != PolicyDecisionType::NavigationAction {
             return false;
         }
-        let Some(nav_decision) =
-            decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
+        let Some(nav_decision) = decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
         else {
             return false;
         };

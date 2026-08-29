@@ -449,6 +449,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mudl-diff"
+version = "0.1.0"
+dependencies = [
+ "mudl-core",
+]
+
+[[package]]
 name = "mudl-gui"
 version = "0.1.0"
 dependencies = [
