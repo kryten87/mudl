@@ -47,6 +47,7 @@ mod tests {
             level,
             id: text.to_lowercase(),
             segments: vec![OutlineTextSegment::Plain(text.to_string())],
+            line: 1,
         }
     }
 

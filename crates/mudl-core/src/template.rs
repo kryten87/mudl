@@ -186,22 +186,40 @@ pub struct AssetSelection {
 /// Pure, deterministic decision logic for which bundled CSS/JS to include in
 /// a rendered document, based only on markers present in `body_html` and on
 /// `options.standalone`.
+///
+/// `body_html` is expected to already carry `mudl-server::document`'s
+/// `up-mode-output`/`down-mode-output` wrapper class (Phase 10) — that's how
+/// this function tells which of `mud-up.js`/`mud-down.js` applies, the same
+/// marker-detection convention it already uses for math/Mermaid/code-fence
+/// content. `mud.js` (shared find/scroll/zoom helpers) is unconditional:
+/// every served page needs it regardless of mode.
 pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection {
     let mut stylesheets = Vec::new();
-    let mut scripts = Vec::new();
+    let mut scripts = vec!["mud.js"];
+
+    if body_html.contains("up-mode-output") {
+        scripts.push("mud-up.js");
+    }
+    if body_html.contains("down-mode-output") {
+        scripts.push("mud-down.js");
+    }
 
     // A `<math>` element, a `mud-math-block` div (present even when the
     // renderer emits escaped-TeX fallback), or a `temml-error` span from
-    // invalid TeX — any of these means the document needs math styles.
+    // invalid TeX — any of these means the document needs math styles and
+    // Temml's client-side initializer.
     if body_html.contains("<math")
         || body_html.contains("mud-math-block")
         || body_html.contains("temml-error")
     {
         stylesheets.push("mud-math.css");
+        scripts.push("temml.min.js");
+        scripts.push("math-init.js");
     }
 
     if body_html.contains("language-mermaid") {
         scripts.push("mermaid.min.js");
+        scripts.push("mermaid-init.js");
     }
 
     // "Any code fence" per the plan's literal wording, not "any code fence
@@ -210,6 +228,7 @@ pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection
     // a language it doesn't touch after Mermaid replaces the block).
     if body_html.contains("<pre><code") {
         scripts.push("highlight.min.js");
+        scripts.push("highlight-init.js");
     }
 
     if !options.standalone {
@@ -548,7 +567,7 @@ mod select_assets_tests {
             selection,
             AssetSelection {
                 stylesheets: vec!["mud-find.css", "mud-narrow.css", "mud-print.css"],
-                scripts: vec![],
+                scripts: vec!["mud.js"],
             }
         );
     }
@@ -560,9 +579,53 @@ mod select_assets_tests {
             selection,
             AssetSelection {
                 stylesheets: vec!["mud-narrow.css", "mud-print.css"],
-                scripts: vec![],
+                scripts: vec!["mud.js"],
             }
         );
+    }
+
+    #[test]
+    fn up_mode_wrapper_triggers_mud_up_script() {
+        let selection = select_assets(r#"<div class="up-mode-output"></div>"#, &options(true));
+        assert_eq!(selection.scripts, vec!["mud.js", "mud-up.js"]);
+    }
+
+    #[test]
+    fn down_mode_wrapper_triggers_mud_down_script() {
+        let selection = select_assets(r#"<div class="down-mode-output"></div>"#, &options(true));
+        assert_eq!(selection.scripts, vec!["mud.js", "mud-down.js"]);
+    }
+
+    #[test]
+    fn no_mode_wrapper_omits_both_mode_scripts() {
+        let selection = select_assets("<p>hi</p>", &options(true));
+        assert!(!selection.scripts.contains(&"mud-up.js"));
+        assert!(!selection.scripts.contains(&"mud-down.js"));
+    }
+
+    #[test]
+    fn math_marker_also_selects_temml_and_math_init_scripts() {
+        let selection = select_assets("<math></math>", &options(true));
+        assert!(selection.scripts.contains(&"temml.min.js"));
+        assert!(selection.scripts.contains(&"math-init.js"));
+    }
+
+    #[test]
+    fn mermaid_marker_also_selects_mermaid_init_script() {
+        let selection = select_assets(
+            "<pre><code class=\"language-mermaid\">graph TD</code></pre>",
+            &options(true),
+        );
+        assert!(selection.scripts.contains(&"mermaid-init.js"));
+    }
+
+    #[test]
+    fn code_fence_also_selects_highlight_init_script() {
+        let selection = select_assets(
+            "<pre><code class=\"language-rust\">fn main() {}</code></pre>",
+            &options(true),
+        );
+        assert!(selection.scripts.contains(&"highlight-init.js"));
     }
 
     #[test]
@@ -633,9 +696,11 @@ mod select_assets_tests {
 
     #[test]
     fn deterministic_order_with_everything_present() {
-        let body = "<math></math>\
+        let body = "<div class=\"up-mode-output\">\
+                    <math></math>\
                     <pre><code class=\"language-mermaid\">graph TD</code></pre>\
-                    <pre><code class=\"language-rust\">fn main() {}</code></pre>";
+                    <pre><code class=\"language-rust\">fn main() {}</code></pre>\
+                    </div>";
         let selection = select_assets(body, &options(false));
         assert_eq!(
             selection,
@@ -646,7 +711,16 @@ mod select_assets_tests {
                     "mud-narrow.css",
                     "mud-print.css",
                 ],
-                scripts: vec!["mermaid.min.js", "highlight.min.js"],
+                scripts: vec![
+                    "mud.js",
+                    "mud-up.js",
+                    "temml.min.js",
+                    "math-init.js",
+                    "mermaid.min.js",
+                    "mermaid-init.js",
+                    "highlight.min.js",
+                    "highlight-init.js",
+                ],
             }
         );
     }

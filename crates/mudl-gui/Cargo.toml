@@ -4,3 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+javascriptcore = { package = "javascriptcore-rs", version = "1.1" }
+mudl-core = { path = "../mudl-core" }
+mudl-config = { path = "../mudl-config" }
+mudl-server = { path = "../mudl-server" }
+mudl-watch = { path = "../mudl-watch" }
