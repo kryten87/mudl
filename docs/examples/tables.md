@@ -84,7 +84,12 @@ escaped-pipe row looks like this:
 ```
 
 Each first cell holds a literal pipe; the `\|` keeps it from starting a new
-column, so the row stays two cells wide.
+column, so the row stays two cells wide. Rendered, it looks like this:
+
+| Expression | Meaning    |
+| ---------- | ---------- |
+| a \| b     | bitwise OR |
+| p(x \| y)  | given y    |
 
 
 ## Ragged rows

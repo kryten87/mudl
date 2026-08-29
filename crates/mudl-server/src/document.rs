@@ -1,7 +1,10 @@
 //! Assembles the full HTML page served at `/` (Phase 10.1 of
 //! `docs/IMPLEMENTATION-PLAN.md`): renders the requested mode via
 //! `mudl_core::render::{render_up, render_down}`, rewrites local image
-//! `src`s through the `/local/` route, wraps the body in the
+//! `src`s through the `/local/` route and local link `href`s through the
+//! `/local-md/`/`/local-file/` routes (`mudl-gui`'s WebView navigation
+//! handler intercepts those before they ever reach this server — see
+//! `mudl-gui/src/linkaction.rs`), wraps the body in the
 //! `up-mode-output`/`down-mode-output` marker `mudl_core::template::select_assets`
 //! keys off of, resolves the resulting asset selection to embedded CSS
 //! content and `/assets/<name>` script tags, and appends the live-reload
@@ -14,7 +17,9 @@
 use mudl_core::options::RenderOptions;
 use mudl_core::render::{render_down, render_up};
 use mudl_core::resources;
-use mudl_core::template::{rewrite_local_image_srcs, select_assets, HtmlDocument, Script};
+use mudl_core::template::{
+    rewrite_local_image_srcs, rewrite_local_link_hrefs, select_assets, HtmlDocument, Script,
+};
 
 use std::path::Path;
 
@@ -72,6 +77,7 @@ pub fn render(
         Mode::Down => render_down(markdown, &config.render_options),
     };
     let body = rewrite_local_image_srcs(&body, base_dir);
+    let body = rewrite_local_link_hrefs(&body, base_dir);
     let wrapped = format!("<div class=\"{}\">{body}</div>", wrapper_class(mode));
 
     let selection = select_assets(&wrapped, &config.render_options);
@@ -98,7 +104,12 @@ pub fn render(
         title: title.to_string(),
         base_href: None,
         styles,
-        csp_img_src: vec!["'self'".to_string()],
+        csp_img_src: vec![
+            "'self'".to_string(),
+            "https:".to_string(),
+            "http:".to_string(),
+            "data:".to_string(),
+        ],
         csp_script_src: vec!["'self'".to_string(), "'unsafe-inline'".to_string()],
         html_classes: html_classes(config),
         zoom_level: match mode {
@@ -238,6 +249,45 @@ mod tests {
     }
 
     #[test]
+    fn local_markdown_link_is_rewritten_through_local_md_route() {
+        let html = render(
+            "[stub](./stub.md)",
+            base_dir(),
+            "notes.md",
+            Mode::Up,
+            0,
+            &DocumentConfig::default(),
+        );
+        assert!(html.contains("href=\"/local-md/"));
+    }
+
+    #[test]
+    fn other_local_file_link_is_rewritten_through_local_file_route() {
+        let html = render(
+            "[text](./example.txt)",
+            base_dir(),
+            "notes.md",
+            Mode::Up,
+            0,
+            &DocumentConfig::default(),
+        );
+        assert!(html.contains("href=\"/local-file/"));
+    }
+
+    #[test]
+    fn anchor_link_is_left_unrewritten() {
+        let html = render(
+            "[jump](#section)",
+            base_dir(),
+            "notes.md",
+            Mode::Up,
+            0,
+            &DocumentConfig::default(),
+        );
+        assert!(html.contains("href=\"#section\""));
+    }
+
+    #[test]
     fn code_fence_selects_highlight_assets() {
         let html = render(
             "```rust\nfn main() {}\n```",
@@ -301,3 +351,4 @@ mod tests {
         assert_eq!(classes, "is-readable-column");
     }
 }
+

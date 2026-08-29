@@ -6,6 +6,7 @@ use std::ops::Range;
 
 use pulldown_cmark::{Event, HeadingLevel, Tag};
 
+use crate::frontmatter;
 use crate::parse::ParsedMarkdown;
 use crate::slug::Tracker;
 
@@ -51,7 +52,19 @@ pub struct OutlineHeading {
 /// the same document order and derive the same string from each one, the
 /// two `Tracker`s (this function's, and `render_up`'s) stay in lockstep.
 pub fn extract_headings(markdown: &str) -> Vec<OutlineHeading> {
-    let parsed = ParsedMarkdown::new(markdown);
+    // A leading YAML frontmatter block is stripped before parsing — the
+    // same frontmatter `render_up` (crate::render) pulls off and renders
+    // as a key-value table instead of Markdown — so a bare `key:` line or
+    // `# comment` inside it can't be misread as a heading. Headings found
+    // in the (frontmatter-stripped) body have their line numbers shifted
+    // back by the frontmatter's line count so they still index into the
+    // *original* document, matching Down mode's unstripped line numbering.
+    let (content, line_offset) = match frontmatter::extract(markdown) {
+        Some(fm) => (fm.body, fm.line_count),
+        None => (markdown.to_string(), 0),
+    };
+
+    let parsed = ParsedMarkdown::new(&content);
     let events = &parsed.events;
     let mut headings = Vec::new();
     let mut tracker = Tracker::new();
@@ -72,7 +85,7 @@ pub fn extract_headings(markdown: &str) -> Vec<OutlineHeading> {
                     level: heading_level_to_u8(level),
                     id,
                     segments,
-                    line: line_number_at(markdown, start_offset),
+                    line: line_number_at(&content, start_offset) + line_offset,
                 });
             }
             _ => pos += 1,
@@ -340,6 +353,36 @@ mod tests {
         assert!(extracted_ids.contains(&"the-foo-api".to_string()));
         assert!(extracted_ids.contains(&"the-foo-api-1".to_string()));
         assert!(extracted_ids.contains(&"the-foo-api-2".to_string()));
+    }
+
+    #[test]
+    fn frontmatter_comment_and_bare_key_are_not_treated_as_headings() {
+        let markdown = "---\ntitle: Hello\n# a comment\nempty_value:\n---\n\n# Real Heading\n";
+        let headings = extract_headings(markdown);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].id, "real-heading");
+    }
+
+    #[test]
+    fn heading_line_number_accounts_for_stripped_frontmatter() {
+        // line_count is 4 (the two `---` delimiters plus the two YAML
+        // lines between them); the heading sits two lines after that.
+        let markdown = "---\ntitle: Hello\nauthor: Jane\n---\n\n# Heading\n";
+        let headings = extract_headings(markdown);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].line, 6);
+    }
+
+    #[test]
+    fn frontmatter_heading_ids_and_lines_match_render_up() {
+        let markdown = "---\ntitle: Hello\n# a comment\nempty_value:\n---\n\n# Heading\n";
+        let headings = extract_headings(markdown);
+        let html = render_up(markdown, &RenderOptions::default());
+        let rendered_ids = extract_id_attributes(&html);
+        assert_eq!(
+            headings.iter().map(|h| h.id.clone()).collect::<Vec<_>>(),
+            rendered_ids
+        );
     }
 
     /// A simple string scan for every `id="..."` attribute value in

@@ -18,23 +18,41 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Tag, TagEnd};
 use crate::alerts::{detect_docc_aside, detect_gfm_alert, parse_aside_tag, AlertCategory};
 use crate::emoji::replace_shortcodes;
 use crate::encoding::html_escape;
+use crate::frontmatter::{self, parse_top_level_keys};
+use crate::frontmatter_html::render_table as render_frontmatter_table;
 use crate::options::RenderOptions;
 use crate::parse::ParsedMarkdown;
 use crate::slug::Tracker;
 
 /// Renders `markdown` to Up-mode HTML body content (no surrounding
 /// `<html>`/`<head>` document — that's Phase 3's `HtmlDocument` template).
+///
+/// A leading YAML frontmatter block (`crate::frontmatter::extract`) is
+/// pulled off first and rendered separately as a collapsible key-value
+/// table (`crate::frontmatter_html::render_table`), prepended to the
+/// document body's own rendered HTML — otherwise the raw YAML would be fed
+/// straight into the CommonMark parser, which happily misreads `key:`
+/// lines as paragraphs and any bare `# comment` as a heading.
 pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
-    let parsed = ParsedMarkdown::new(markdown);
+    let (body, frontmatter_html) = match frontmatter::extract(markdown) {
+        Some(fm) => {
+            let keys = parse_top_level_keys(&fm.yaml);
+            (fm.body, render_frontmatter_table(&keys))
+        }
+        None => (markdown.to_string(), String::new()),
+    };
+
+    let parsed = ParsedMarkdown::new(&body);
     let mut renderer = Renderer {
         events: &parsed.events,
         pos: 0,
-        out: String::new(),
+        out: frontmatter_html,
         slugs: Tracker::new(),
         options,
         table_alignments: Vec::new(),
         in_table_head: false,
         cell_index: 0,
+        skip_leading_dollar: false,
     };
     renderer.run();
     renderer.out
@@ -81,6 +99,11 @@ struct Renderer<'a> {
     table_alignments: Vec<Alignment>,
     in_table_head: bool,
     cell_index: usize,
+    // Set by the `` $`…`$ `` inline-math check in `render_leaf`'s `Code`
+    // arm when it consumes the opening `$` off the end of `self.out`: the
+    // very next event is the `Text` holding the closing `$`, so its leading
+    // byte must be dropped too. Always consumed by the next `Text` seen.
+    skip_leading_dollar: bool,
 }
 
 impl<'a> Renderer<'a> {
@@ -222,12 +245,53 @@ impl<'a> Renderer<'a> {
         (text, idx)
     }
 
+    /// GitHub's other display-math form: a paragraph whose entire text is
+    /// fenced by a literal `$$` at each end (the doc's own example:
+    /// `$$ x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a} $$` as its own paragraph).
+    /// If `self.pos` (already past the `Paragraph` `Start`) opens such a
+    /// paragraph, consumes it through its matching `End` and returns the
+    /// inner TeX; otherwise leaves `self.pos` untouched.
+    fn take_display_math_paragraph(&mut self) -> Option<String> {
+        let trimmed = self.peek_plain_text(self.pos).trim().to_string();
+        if trimmed.len() > 4 && trimmed.starts_with("$$") && trimmed.ends_with("$$") {
+            self.collect_plain_text();
+            Some(trimmed[2..trimmed.len() - 2].trim().to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Emits the same `<pre><code class="language-math">` markup a fenced
+    /// ` ```math ` block gets from `render_code_block`, so a `$$ ... $$`
+    /// paragraph is picked up by the identical client-side Temml pass in
+    /// `math-init.js` — no separate JS path needed for this form.
+    fn push_math_fence(&mut self, tex: &str) {
+        self.out.push_str("<pre><code class=\"language-math\">");
+        self.out.push_str(&html_escape(tex));
+        self.out.push_str("\n</code></pre>\n");
+    }
+
+    /// The inline counterpart to `push_math_fence`: `math-init.js` selects
+    /// on the `language-math-inline` class (a superstring of
+    /// `language-math`, so `select_assets`'s substring check still catches
+    /// it) and renders with `displayMode: false` instead of swapping in a
+    /// `<pre>`-based block wrapper, keeping the math flowing inline.
+    fn push_inline_math(&mut self, tex: &str) {
+        self.out.push_str("<code class=\"language-math-inline\">");
+        self.out.push_str(&html_escape(tex));
+        self.out.push_str("</code>");
+    }
+
     fn render_container(&mut self, tag: Tag<'a>) {
         match tag {
             Tag::Paragraph => {
-                self.out.push_str("<p>");
-                self.children();
-                self.out.push_str("</p>\n");
+                if let Some(tex) = self.take_display_math_paragraph() {
+                    self.push_math_fence(&tex);
+                } else {
+                    self.out.push_str("<p>");
+                    self.children();
+                    self.out.push_str("</p>\n");
+                }
             }
             Tag::Heading { level, .. } => {
                 let plain = self.peek_plain_text(self.pos);
@@ -295,12 +359,32 @@ impl<'a> Renderer<'a> {
     fn render_leaf(&mut self, event: Event<'a>) {
         match event {
             Event::Text(s) => {
-                self.out.push_str(&html_escape(&replace_shortcodes(&s)));
+                let s: &str = if self.skip_leading_dollar {
+                    self.skip_leading_dollar = false;
+                    &s[1..]
+                } else {
+                    &s
+                };
+                self.out.push_str(&html_escape(&replace_shortcodes(s)));
             }
             Event::Code(s) => {
-                self.out.push_str("<code>");
-                self.out.push_str(&html_escape(&s));
-                self.out.push_str("</code>");
+                // GitHub's inline-math form: a code span immediately
+                // flanked by a bare `$` on each side — `` $`…`$ `` — with
+                // no space between the `$` and the backtick, unlike a bare
+                // `$x + y$` (which the parser never turns into a `Code`
+                // event at all, so it can't reach this branch and stays
+                // literal text, matching the doc's "what is not math").
+                let closes_with_dollar =
+                    matches!(self.current(), Some(Event::Text(t)) if t.starts_with('$'));
+                if self.out.ends_with('$') && closes_with_dollar {
+                    self.out.pop();
+                    self.push_inline_math(&s);
+                    self.skip_leading_dollar = true;
+                } else {
+                    self.out.push_str("<code>");
+                    self.out.push_str(&html_escape(&s));
+                    self.out.push_str("</code>");
+                }
             }
             Event::InlineHtml(s) => {
                 self.out.push_str(&s);
@@ -1028,6 +1112,76 @@ mod tests {
         }
     }
 
+    // MARK: Display/inline math ($$...$$ and $`...`$)
+
+    mod math_tests {
+        use super::render;
+
+        #[test]
+        fn dollar_paragraph_renders_as_a_math_fence() {
+            assert_eq!(
+                render("$$ x = \\frac{-b}{2a} $$"),
+                "<pre><code class=\"language-math\">x = \\frac{-b}{2a}\n</code></pre>\n"
+            );
+        }
+
+        #[test]
+        fn dollar_paragraph_preserves_underscored_subscripts() {
+            assert_eq!(
+                render("$$ a_1 x_1 = b $$"),
+                "<pre><code class=\"language-math\">a_1 x_1 = b\n</code></pre>\n"
+            );
+        }
+
+        #[test]
+        fn bare_single_dollar_pair_is_not_math() {
+            assert_eq!(render("$x + y$"), "<p>$x + y$</p>\n");
+        }
+
+        #[test]
+        fn dollar_amounts_in_prose_are_not_math() {
+            assert_eq!(
+                render("a coffee is $3 and a refill is $2"),
+                "<p>a coffee is $3 and a refill is $2</p>\n"
+            );
+        }
+
+        #[test]
+        fn backtick_dollar_span_renders_as_inline_math() {
+            assert_eq!(
+                render("The area is $`\\pi r^2`$ exactly."),
+                "<p>The area is <code class=\"language-math-inline\">\\pi r^2</code> exactly.</p>\n"
+            );
+        }
+
+        #[test]
+        fn adjacent_inline_math_spans_both_render() {
+            assert_eq!(
+                render("radius $`r`$ is $`\\pi r^2`$ area"),
+                "<p>radius <code class=\"language-math-inline\">r</code> is \
+                 <code class=\"language-math-inline\">\\pi r^2</code> area</p>\n"
+            );
+        }
+
+        #[test]
+        fn inline_math_content_is_escaped() {
+            assert_eq!(
+                render("$`a < b & c`$"),
+                "<p><code class=\"language-math-inline\">a &lt; b &amp; c</code></p>\n"
+            );
+        }
+
+        #[test]
+        fn spaced_dollar_backtick_is_not_inline_math() {
+            assert_eq!(render("$ `code` $"), "<p>$ <code>code</code> $</p>\n");
+        }
+
+        #[test]
+        fn plain_code_span_is_unaffected() {
+            assert_eq!(render("`code`"), "<p><code>code</code></p>\n");
+        }
+    }
+
     // MARK: Thematic breaks
 
     mod thematic_break_tests {
@@ -1223,6 +1377,46 @@ mod tests {
                 render("<jane@example.com>"),
                 "<p><a href=\"mailto:jane@example.com\">jane@example.com</a></p>\n"
             );
+        }
+    }
+
+    // MARK: Frontmatter
+
+    mod frontmatter_tests {
+        use super::render;
+
+        #[test]
+        fn frontmatter_renders_as_table_before_body() {
+            let html = render("---\ntitle: Hello\nauthor: Jane\n---\n\n# Heading\n");
+            assert_eq!(
+                html,
+                "<details class=\"mud-frontmatter\"><summary>Frontmatter</summary>\
+<table class=\"mud-frontmatter-table\">\
+<tr><th>title</th><td>Hello</td></tr>\
+<tr><th>author</th><td>Jane</td></tr>\
+</table></details><h1 id=\"heading\">Heading</h1>\n"
+            );
+        }
+
+        #[test]
+        fn frontmatter_comment_and_bare_key_are_not_treated_as_markdown() {
+            // A `#`-led comment and a key with no value, inside frontmatter,
+            // must not surface as a heading or stray text in the body.
+            let html = render("---\ntitle: Hello\n# a comment\nempty_value:\n---\n\nBody\n");
+            assert!(!html.contains("<h1"));
+            assert!(html.contains("<p>Body</p>"));
+        }
+
+        #[test]
+        fn no_frontmatter_renders_body_only() {
+            assert_eq!(render("# Heading"), "<h1 id=\"heading\">Heading</h1>\n");
+        }
+
+        #[test]
+        fn empty_frontmatter_produces_no_details_wrapper() {
+            let html = render("---\n---\n\nBody\n");
+            assert!(!html.contains("<details"));
+            assert!(html.contains("<p>Body</p>"));
         }
     }
 }

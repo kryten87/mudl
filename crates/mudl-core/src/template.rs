@@ -204,11 +204,14 @@ pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection
         scripts.push("mud-down.js");
     }
 
-    // A `<math>` element, a `mud-math-block` div (present even when the
+    // A `language-math` fenced code block (what `render_up` actually emits
+    // server-side for a ```math fence — Temml hasn't run yet at this point),
+    // a `<math>` element, a `mud-math-block` div (present even when the
     // renderer emits escaped-TeX fallback), or a `temml-error` span from
     // invalid TeX — any of these means the document needs math styles and
     // Temml's client-side initializer.
-    if body_html.contains("<math")
+    if body_html.contains("language-math")
+        || body_html.contains("<math")
         || body_html.contains("mud-math-block")
         || body_html.contains("temml-error")
     {
@@ -330,6 +333,118 @@ fn rewrite_src(src: &str, base_dir: &Path) -> String {
 
     let resolved = base_dir.join(src);
     format!("/local/{}", percent_encode(&resolved.to_string_lossy()))
+}
+
+/// Rewrites local-file `<a href="...">` targets in rendered HTML so
+/// `mudl-gui`'s WebView navigation handler can tell, from the URL alone,
+/// that a click should open a new mudl window (`.md`/`.markdown` files) or
+/// hand off to `xdg-open` (every other local file) instead of navigating
+/// the WebView itself.
+///
+/// Left untouched: in-page anchors (a bare `#section` href), and anything
+/// [`crate::images::is_external_source`] already treats as external
+/// (`http(s)://`, `mailto:`, `data:`) — those are handled directly by the
+/// WebView/OS, not routed through `mudl-server`. Everything else is
+/// resolved against `base_dir` the same way [`rewrite_local_image_srcs`]
+/// resolves an image `src`, then percent-encoded and rewritten to
+/// `/local-md/<encoded>` or `/local-file/<encoded>` depending on its
+/// extension.
+pub fn rewrite_local_link_hrefs(html: &str, base_dir: &Path) -> String {
+    rewrite_a_hrefs(html, &|href| rewrite_href(href, base_dir))
+}
+
+/// The shared `<a href="...">` text scanner behind [`rewrite_local_link_hrefs`],
+/// mirroring [`rewrite_img_srcs`] but keyed on the `<a>` tag and its `href`
+/// attribute instead of `<img>`/`src`.
+pub(crate) fn rewrite_a_hrefs(html: &str, rewrite_one: &dyn Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+
+    while let Some(tag_start) = find_anchor_tag_start(rest) {
+        out.push_str(&rest[..tag_start]);
+        let from_tag = &rest[tag_start..];
+
+        match from_tag.find('>') {
+            Some(close_rel) => {
+                let tag_end = close_rel + 1;
+                out.push_str(&rewrite_a_tag(&from_tag[..tag_end], rewrite_one));
+                rest = &from_tag[tag_end..];
+            }
+            None => {
+                out.push_str(from_tag);
+                rest = "";
+            }
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// Finds the byte offset of the next `<a>` tag's start in `s`, requiring
+/// the `a` be followed by whitespace, `>`, or `/` so `<article>`,
+/// `<aside>`, and `<audio>` tags aren't mistaken for anchors.
+fn find_anchor_tag_start(s: &str) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(rel) = s[search_from..].find("<a") {
+        let idx = search_from + rel;
+        let after = idx + 2;
+        match s[after..].chars().next() {
+            Some(c) if c.is_whitespace() || c == '>' || c == '/' => return Some(idx),
+            _ => search_from = after,
+        }
+    }
+    None
+}
+
+/// Rewrites the `href="..."` attribute value (if any) within a single
+/// already-isolated `<a ...>` tag; everything else in `tag` is copied
+/// verbatim.
+fn rewrite_a_tag(tag: &str, rewrite_one: &dyn Fn(&str) -> String) -> String {
+    const NEEDLE: &str = "href=\"";
+
+    let Some(attr_start) = tag.find(NEEDLE) else {
+        return tag.to_string();
+    };
+    let value_start = attr_start + NEEDLE.len();
+    let Some(value_len) = tag[value_start..].find('"') else {
+        return tag.to_string();
+    };
+
+    let href = &tag[value_start..value_start + value_len];
+    let rewritten = rewrite_one(href);
+
+    format!(
+        "{}{}{}",
+        &tag[..value_start],
+        rewritten,
+        &tag[value_start + value_len..]
+    )
+}
+
+/// Rewrites a single `href` value: an in-page anchor or external source
+/// (per [`crate::images::is_external_source`]) passes through unchanged;
+/// everything else becomes `/local-md/<percent-encoded-absolute-path>` (for
+/// a `.md`/`.markdown` target) or `/local-file/<percent-encoded-absolute-path>`
+/// (for anything else).
+fn rewrite_href(href: &str, base_dir: &Path) -> String {
+    if href.starts_with('#') || is_external_source(href) {
+        return href.to_string();
+    }
+
+    let resolved = base_dir.join(href);
+    let is_markdown = resolved
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+        .unwrap_or(false);
+    let prefix = if is_markdown {
+        "/local-md/"
+    } else {
+        "/local-file/"
+    };
+
+    format!("{prefix}{}", percent_encode(&resolved.to_string_lossy()))
 }
 
 /// A minimal RFC 3986 percent-encoder: bytes in the "unreserved" set
@@ -611,6 +726,25 @@ mod select_assets_tests {
     }
 
     #[test]
+    fn math_fence_also_selects_temml_and_math_init_scripts() {
+        let selection = select_assets(
+            "<pre><code class=\"language-math\">x^2</code></pre>",
+            &options(true),
+        );
+        assert!(selection.scripts.contains(&"temml.min.js"));
+        assert!(selection.scripts.contains(&"math-init.js"));
+    }
+
+    #[test]
+    fn math_fence_class_triggers_math_css() {
+        let selection = select_assets(
+            "<pre><code class=\"language-math\">x^2</code></pre>",
+            &options(true),
+        );
+        assert!(selection.stylesheets.contains(&"mud-math.css"));
+    }
+
+    #[test]
     fn mermaid_marker_also_selects_mermaid_init_script() {
         let selection = select_assets(
             "<pre><code class=\"language-mermaid\">graph TD</code></pre>",
@@ -820,6 +954,125 @@ mod rewrite_local_image_srcs_tests {
         assert_eq!(
             rewrite_local_image_srcs(html, base),
             "<img src=\"/local//absolute/photo.png\">"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rewrite_local_link_hrefs_tests {
+    use super::rewrite_local_link_hrefs;
+    use std::path::Path;
+
+    #[test]
+    fn relative_markdown_link_is_rewritten_to_local_md_route() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="stub.md">stub</a>"#;
+        assert_eq!(
+            rewrite_local_link_hrefs(html, base),
+            "<a href=\"/local-md//base/dir/stub.md\">stub</a>"
+        );
+    }
+
+    #[test]
+    fn relative_markdown_extension_link_is_rewritten_to_local_md_route() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="notes.markdown">notes</a>"#;
+        assert_eq!(
+            rewrite_local_link_hrefs(html, base),
+            "<a href=\"/local-md//base/dir/notes.markdown\">notes</a>"
+        );
+    }
+
+    #[test]
+    fn parent_directory_markdown_link_is_rewritten() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="../Plans/plan.md">plan</a>"#;
+        assert_eq!(
+            rewrite_local_link_hrefs(html, base),
+            "<a href=\"/local-md//base/dir/../Plans/plan.md\">plan</a>"
+        );
+    }
+
+    #[test]
+    fn other_local_file_link_is_rewritten_to_local_file_route() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="example.txt">text</a>"#;
+        assert_eq!(
+            rewrite_local_link_hrefs(html, base),
+            "<a href=\"/local-file//base/dir/example.txt\">text</a>"
+        );
+    }
+
+    #[test]
+    fn anchor_link_is_left_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = "<a href=\"#section\">jump</a>";
+        assert_eq!(rewrite_local_link_hrefs(html, base), html);
+    }
+
+    #[test]
+    fn https_link_is_left_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="https://example.com">ex</a>"#;
+        assert_eq!(rewrite_local_link_hrefs(html, base), html);
+    }
+
+    #[test]
+    fn http_link_is_left_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="http://example.com">ex</a>"#;
+        assert_eq!(rewrite_local_link_hrefs(html, base), html);
+    }
+
+    #[test]
+    fn mailto_link_is_left_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="mailto:test@example.com">mail</a>"#;
+        assert_eq!(rewrite_local_link_hrefs(html, base), html);
+    }
+
+    #[test]
+    fn similarly_named_tags_are_not_mistaken_for_anchors() {
+        let base = Path::new("/base/dir");
+        let html = r#"<article><aside>x</aside></article>"#;
+        assert_eq!(rewrite_local_link_hrefs(html, base), html);
+    }
+
+    #[test]
+    fn multiple_links_are_each_rewritten_independently() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="a.md">a</a> and <a href="b.txt">b</a>"#;
+        assert_eq!(
+            rewrite_local_link_hrefs(html, base),
+            "<a href=\"/local-md//base/dir/a.md\">a</a> and \
+             <a href=\"/local-file//base/dir/b.txt\">b</a>"
+        );
+    }
+
+    #[test]
+    fn other_attributes_are_preserved_untouched() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a class="link" href="stub.md" title="Stub">stub</a>"#;
+        assert_eq!(
+            rewrite_local_link_hrefs(html, base),
+            "<a class=\"link\" href=\"/local-md//base/dir/stub.md\" title=\"Stub\">stub</a>"
+        );
+    }
+
+    #[test]
+    fn html_with_no_a_tags_is_unchanged() {
+        let base = Path::new("/base/dir");
+        let html = "<p>No links here.</p>";
+        assert_eq!(rewrite_local_link_hrefs(html, base), html);
+    }
+
+    #[test]
+    fn extension_case_is_ignored() {
+        let base = Path::new("/base/dir");
+        let html = r#"<a href="STUB.MD">stub</a>"#;
+        assert_eq!(
+            rewrite_local_link_hrefs(html, base),
+            "<a href=\"/local-md//base/dir/STUB.MD\">stub</a>"
         );
     }
 }
