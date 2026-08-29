@@ -4,10 +4,12 @@ use crate::frontmatter::{FrontMatterValue, KeyValue};
 /// Renders parsed frontmatter keys (from [`crate::frontmatter::parse_top_level_keys`])
 /// as a collapsible `<details><table>` HTML fragment for Up-mode rendering.
 ///
-/// Shape: `<details class="frontmatter"><summary>Frontmatter</summary>
-/// <table><tr><th>{key}</th><td>{value}</td></tr>...</table></details>`,
+/// Shape: `<details class="mud-frontmatter"><summary>Frontmatter</summary>
+/// <table class="mud-frontmatter-table"><tr><th>{key}</th><td>{value}</td></tr>...</table></details>`,
 /// one row per key, in input order. An empty key list produces an empty
 /// string — no `<details>` wrapper at all, since there is nothing to show.
+/// The `mud-frontmatter`/`mud-frontmatter-table` classes are what
+/// `mud-up.css` styles this fragment through.
 ///
 /// Value rendering per variant:
 /// - `Scalar` renders as escaped text.
@@ -33,8 +35,9 @@ pub fn render_table(keys: &[KeyValue]) -> String {
         return String::new();
     }
 
-    let mut html =
-        String::from("<details class=\"frontmatter\"><summary>Frontmatter</summary><table>");
+    let mut html = String::from(
+        "<details class=\"mud-frontmatter\"><summary>Frontmatter</summary><table class=\"mud-frontmatter-table\">",
+    );
     for kv in keys {
         html.push_str("<tr><th>");
         html.push_str(&html_escape(&kv.key));
@@ -83,7 +86,7 @@ mod tests {
         ];
         assert_eq!(
             render_table(&keys),
-            "<details class=\"frontmatter\"><summary>Frontmatter</summary><table>\
+            "<details class=\"mud-frontmatter\"><summary>Frontmatter</summary><table class=\"mud-frontmatter-table\">\
 <tr><th>title</th><td>Hello</td></tr>\
 <tr><th>author</th><td>Jane Doe</td></tr>\
 </table></details>"
@@ -102,7 +105,7 @@ mod tests {
         }];
         assert_eq!(
             render_table(&keys),
-            "<details class=\"frontmatter\"><summary>Frontmatter</summary><table>\
+            "<details class=\"mud-frontmatter\"><summary>Frontmatter</summary><table class=\"mud-frontmatter-table\">\
 <tr><th>tags</th><td>swift, markdown, preview</td></tr>\
 </table></details>"
         );
@@ -119,7 +122,7 @@ mod tests {
         }];
         assert_eq!(
             render_table(&keys),
-            "<details class=\"frontmatter\"><summary>Frontmatter</summary><table>\
+            "<details class=\"mud-frontmatter\"><summary>Frontmatter</summary><table class=\"mud-frontmatter-table\">\
 <tr><th>tags</th><td>  - swift</td></tr>\
 </table></details>"
         );
@@ -133,7 +136,7 @@ mod tests {
         }];
         assert_eq!(
             render_table(&keys),
-            "<details class=\"frontmatter\"><summary>Frontmatter</summary><table>\
+            "<details class=\"mud-frontmatter\"><summary>Frontmatter</summary><table class=\"mud-frontmatter-table\">\
 <tr><th>config</th><td><pre><code>  nested:\n    key: value\n    other: thing\
 </code></pre></td></tr></table></details>"
         );
@@ -147,7 +150,7 @@ mod tests {
         }];
         assert_eq!(
             render_table(&keys),
-            "<details class=\"frontmatter\"><summary>Frontmatter</summary><table>\
+            "<details class=\"mud-frontmatter\"><summary>Frontmatter</summary><table class=\"mud-frontmatter-table\">\
 <tr><th>notes</th><td></td></tr></table></details>"
         );
     }

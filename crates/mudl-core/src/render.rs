@@ -18,18 +18,35 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Tag, TagEnd};
 use crate::alerts::{detect_docc_aside, detect_gfm_alert, parse_aside_tag, AlertCategory};
 use crate::emoji::replace_shortcodes;
 use crate::encoding::html_escape;
+use crate::frontmatter::{self, parse_top_level_keys};
+use crate::frontmatter_html::render_table as render_frontmatter_table;
 use crate::options::RenderOptions;
 use crate::parse::ParsedMarkdown;
 use crate::slug::Tracker;
 
 /// Renders `markdown` to Up-mode HTML body content (no surrounding
 /// `<html>`/`<head>` document — that's Phase 3's `HtmlDocument` template).
+///
+/// A leading YAML frontmatter block (`crate::frontmatter::extract`) is
+/// pulled off first and rendered separately as a collapsible key-value
+/// table (`crate::frontmatter_html::render_table`), prepended to the
+/// document body's own rendered HTML — otherwise the raw YAML would be fed
+/// straight into the CommonMark parser, which happily misreads `key:`
+/// lines as paragraphs and any bare `# comment` as a heading.
 pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
-    let parsed = ParsedMarkdown::new(markdown);
+    let (body, frontmatter_html) = match frontmatter::extract(markdown) {
+        Some(fm) => {
+            let keys = parse_top_level_keys(&fm.yaml);
+            (fm.body, render_frontmatter_table(&keys))
+        }
+        None => (markdown.to_string(), String::new()),
+    };
+
+    let parsed = ParsedMarkdown::new(&body);
     let mut renderer = Renderer {
         events: &parsed.events,
         pos: 0,
-        out: String::new(),
+        out: frontmatter_html,
         slugs: Tracker::new(),
         options,
         table_alignments: Vec::new(),
@@ -1223,6 +1240,46 @@ mod tests {
                 render("<jane@example.com>"),
                 "<p><a href=\"mailto:jane@example.com\">jane@example.com</a></p>\n"
             );
+        }
+    }
+
+    // MARK: Frontmatter
+
+    mod frontmatter_tests {
+        use super::render;
+
+        #[test]
+        fn frontmatter_renders_as_table_before_body() {
+            let html = render("---\ntitle: Hello\nauthor: Jane\n---\n\n# Heading\n");
+            assert_eq!(
+                html,
+                "<details class=\"mud-frontmatter\"><summary>Frontmatter</summary>\
+<table class=\"mud-frontmatter-table\">\
+<tr><th>title</th><td>Hello</td></tr>\
+<tr><th>author</th><td>Jane</td></tr>\
+</table></details><h1 id=\"heading\">Heading</h1>\n"
+            );
+        }
+
+        #[test]
+        fn frontmatter_comment_and_bare_key_are_not_treated_as_markdown() {
+            // A `#`-led comment and a key with no value, inside frontmatter,
+            // must not surface as a heading or stray text in the body.
+            let html = render("---\ntitle: Hello\n# a comment\nempty_value:\n---\n\nBody\n");
+            assert!(!html.contains("<h1"));
+            assert!(html.contains("<p>Body</p>"));
+        }
+
+        #[test]
+        fn no_frontmatter_renders_body_only() {
+            assert_eq!(render("# Heading"), "<h1 id=\"heading\">Heading</h1>\n");
+        }
+
+        #[test]
+        fn empty_frontmatter_produces_no_details_wrapper() {
+            let html = render("---\n---\n\nBody\n");
+            assert!(!html.contains("<details"));
+            assert!(html.contains("<p>Body</p>"));
         }
     }
 }
