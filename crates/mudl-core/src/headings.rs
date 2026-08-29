@@ -31,6 +31,11 @@ pub struct OutlineHeading {
     pub level: u8,
     pub id: String,
     pub segments: Vec<OutlineTextSegment>,
+    /// The heading's 1-indexed line number in the source document — lets a
+    /// sidebar (Phase 10.3) locate the corresponding `.line[data-line="N"]`
+    /// element in Down mode's raw-source view, where there's no `id=`
+    /// attribute to jump to the way Up mode has.
+    pub line: usize,
 }
 
 /// Walks `markdown`'s `pulldown-cmark` event stream (the same parse
@@ -56,6 +61,7 @@ pub fn extract_headings(markdown: &str) -> Vec<OutlineHeading> {
         match &events[pos].0 {
             Event::Start(Tag::Heading { level, .. }) => {
                 let level = *level;
+                let start_offset = events[pos].1.start;
                 pos += 1; // consume Start(Heading)
                 let (segments, next_pos) = collect_heading_segments(events, pos);
                 pos = next_pos;
@@ -66,6 +72,7 @@ pub fn extract_headings(markdown: &str) -> Vec<OutlineHeading> {
                     level: heading_level_to_u8(level),
                     id,
                     segments,
+                    line: line_number_at(markdown, start_offset),
                 });
             }
             _ => pos += 1,
@@ -73,6 +80,13 @@ pub fn extract_headings(markdown: &str) -> Vec<OutlineHeading> {
     }
 
     headings
+}
+
+/// The 1-indexed line number containing byte offset `pos`, counting `\n`s
+/// before it — the same simple `str::lines()`-equivalent numbering
+/// `render_down` uses for its `data-line` attributes, so the two agree.
+fn line_number_at(markdown: &str, pos: usize) -> usize {
+    markdown[..pos].matches('\n').count() + 1
 }
 
 fn heading_level_to_u8(level: HeadingLevel) -> u8 {
@@ -180,6 +194,20 @@ mod tests {
         assert_eq!(headings[0].id, "one");
         assert_eq!(headings[1].id, "two");
         assert_eq!(headings[2].id, "three");
+    }
+
+    #[test]
+    fn line_number_is_one_indexed_and_tracks_each_headings_own_line() {
+        let headings = extract_headings("intro text\n\n# One\n\nbody\n\n## Two\n");
+        assert_eq!(headings.len(), 2);
+        assert_eq!(headings[0].line, 3);
+        assert_eq!(headings[1].line, 7);
+    }
+
+    #[test]
+    fn line_number_of_a_heading_with_no_preceding_content_is_one() {
+        let headings = extract_headings("# Hello\n");
+        assert_eq!(headings[0].line, 1);
     }
 
     #[test]

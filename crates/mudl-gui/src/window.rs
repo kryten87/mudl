@@ -20,11 +20,14 @@ use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::WebViewExt;
 
+use mudl_core::headings::extract_headings;
+use mudl_core::outline;
 use mudl_server::fs::RealFileSystem;
 use mudl_server::routes::Mode;
 use mudl_server::server::{self, DocumentSource};
 use mudl_server::version::VersionCounter;
 
+use crate::sidebar;
 use crate::toggle::next_mode;
 
 const APP_ID: &str = "com.monstergfx.mudl";
@@ -46,10 +49,15 @@ pub fn run(path: PathBuf) -> Result<(), String> {
     let absolute =
         std::fs::canonicalize(&path).map_err(|err| format!("{}: {err}", path.display()))?;
 
+    // Best-effort: the sidebar's initial outline just starts empty if the
+    // file can't be read here (the main WebView will independently 404 for
+    // the same reason once it navigates to the server).
+    let markdown = std::fs::read_to_string(&absolute).unwrap_or_default();
+
     let addr = start_server_for(absolute)?;
 
     let application = gtk::Application::new(Some(APP_ID), gtk::gio::ApplicationFlags::empty());
-    application.connect_activate(move |app| build_window(app, addr));
+    application.connect_activate(move |app| build_window(app, addr, &markdown));
 
     // No CLI args of ours are meaningful to GTK/GApplication's own option
     // parsing, so run with an empty argv rather than `run()`'s default of
@@ -60,7 +68,7 @@ pub fn run(path: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-fn build_window(app: &gtk::Application, addr: SocketAddr) {
+fn build_window(app: &gtk::Application, addr: SocketAddr, markdown: &str) {
     let window = gtk::ApplicationWindow::new(app);
     window.set_title("mudl");
     window.set_default_size(960, 720);
@@ -68,19 +76,40 @@ fn build_window(app: &gtk::Application, addr: SocketAddr) {
     let webview = webkit2gtk::WebView::new();
     webview.load_uri(&format!("http://{addr}/"));
 
-    // The mode a Space-bar press toggles *from*, and the scroll fraction
-    // captured just before that toggle's navigation — both need to survive
-    // from the key-press handler to the load-changed handler that restores
-    // scroll position on the new page, so both live in `Rc<Cell<_>>` shared
-    // between the two closures (GTK's main loop is single-threaded; `Rc`,
-    // not `Arc`, is the right tool here).
+    // The mode a Space-bar press toggles *from*, shared with the sidebar's
+    // row-activation handler so it knows whether to navigate by `#slug`
+    // (Up) or by `data-line` (Down) — and the scroll fraction captured just
+    // before a mode-toggle navigation, restored by the load-changed
+    // handler once the new page loads. All three live in `Rc<Cell<_>>`,
+    // shared across closures on GTK's single-threaded main loop (`Rc`, not
+    // `Arc`, is the right tool here).
     let mode = Rc::new(Cell::new(Mode::Up));
     let pending_scroll_fraction = Rc::new(Cell::new(0.0_f64));
 
     connect_scroll_restore(&webview, Rc::clone(&pending_scroll_fraction));
-    connect_mode_toggle(&window, &webview, addr, mode, pending_scroll_fraction);
+    connect_mode_toggle(
+        &window,
+        &webview,
+        addr,
+        Rc::clone(&mode),
+        pending_scroll_fraction,
+    );
 
-    window.add(&webview);
+    let headings = extract_headings(markdown);
+    let outline_tree = outline::build_tree(&headings);
+    let sidebar_view = sidebar::build_outline_tree_view(&outline_tree);
+    connect_sidebar_navigation(&sidebar_view, &webview, mode);
+
+    let sidebar_scroller =
+        gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    sidebar_scroller.add(&sidebar_view);
+    sidebar_scroller.set_size_request(220, -1);
+
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.pack1(&sidebar_scroller, false, false);
+    paned.pack2(&webview, true, true);
+
+    window.add(&paned);
     window.show_all();
 }
 
@@ -143,6 +172,27 @@ fn connect_mode_toggle(
         );
 
         gtk::glib::Propagation::Stop
+    });
+}
+
+/// Row activation (double-click or Enter) in the outline sidebar: reads
+/// the activated row's slug/line back out of the tree store and runs
+/// `sidebar::navigation_script` in the WebView to jump there.
+fn connect_sidebar_navigation(
+    tree_view: &gtk::TreeView,
+    webview: &webkit2gtk::WebView,
+    mode: Rc<Cell<Mode>>,
+) {
+    let webview = webview.clone();
+    tree_view.connect_row_activated(move |tree_view, path, _column| {
+        let Some(model) = tree_view.model().and_downcast::<gtk::TreeStore>() else {
+            return;
+        };
+        let Some((slug, line)) = sidebar::slug_and_line_at(&model, path) else {
+            return;
+        };
+        let script = sidebar::navigation_script(mode.get(), &slug, line);
+        webview.evaluate_javascript(&script, None, None, None::<&gtk::gio::Cancellable>, |_| {});
     });
 }
 
