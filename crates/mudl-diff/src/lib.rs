@@ -7,6 +7,7 @@
 //! only on its `footnotes::is_comment_label` predicate, reused rather than
 //! re-implemented.
 
+pub mod block;
 mod lcs;
 pub mod line;
 pub mod pairing;
