@@ -3,6 +3,12 @@
 //! loading/saving it via the injected `FileSystem` trait.
 
 pub mod format;
+pub mod preferences;
+
+pub use preferences::{
+    DocCAlertMode, FloatingControlsPosition, FolderOpenBehavior, Lighting, Preferences,
+    SidebarPane, Theme,
+};
 
 #[cfg(test)]
 mod tests {
