@@ -8,6 +8,7 @@
 //! re-implemented.
 
 pub mod block;
+pub mod git;
 mod lcs;
 pub mod line;
 pub mod pairing;
