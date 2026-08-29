@@ -1,0 +1,24 @@
+# Ubuntu application-menu entry and text/markdown MIME association
+# (Phase 11, step 11.2 of docs/IMPLEMENTATION-PLAN.md). Install to
+# ~/.local/share/applications/mudl.desktop (per-user) or
+# /usr/share/applications/mudl.desktop (system-wide), then run
+# `update-desktop-database` on that applications directory.
+#
+# Assumes `mudl` is reachable on $PATH (see the Phase 11.1 CLI installer,
+# which symlinks it into ~/.local/bin). Icon= names a hicolor-theme icon
+# (mudl.svg/.png) to be installed alongside by Phase 12 packaging — not
+# yet present in this repo.
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=mudl
+GenericName=Markdown Viewer
+Comment=A Perfect Markdown Viewer
+Exec=mudl %F
+TryExec=mudl
+Icon=mudl
+Terminal=false
+NoDisplay=false
+StartupNotify=true
+Categories=Office;Viewer;TextEditor;
+MimeType=text/markdown;
