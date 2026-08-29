@@ -33,6 +33,14 @@ pub struct DocumentConfig {
     pub theme_css_name: &'static str,
     pub up_zoom: f64,
     pub down_zoom: f64,
+    /// Down mode's `has-line-numbers` root class (`mud-down.css`'s
+    /// `html:not(.has-line-numbers) .ln { ... }`).
+    pub show_line_numbers: bool,
+    /// Down mode's `has-word-wrap` root class (`mud-down.css`).
+    pub wrap_lines: bool,
+    /// Both modes' `is-readable-column` root class (`mud-up.css`/
+    /// `mud-down.css`).
+    pub readable_column: bool,
 }
 
 impl Default for DocumentConfig {
@@ -42,6 +50,9 @@ impl Default for DocumentConfig {
             theme_css_name: "theme-earthy.css",
             up_zoom: 1.0,
             down_zoom: 1.0,
+            show_line_numbers: true,
+            wrap_lines: true,
+            readable_column: false,
         }
     }
 }
@@ -89,7 +100,7 @@ pub fn render(
         styles,
         csp_img_src: vec!["'self'".to_string()],
         csp_script_src: vec!["'self'".to_string(), "'unsafe-inline'".to_string()],
-        html_classes: Vec::new(),
+        html_classes: html_classes(config),
         zoom_level: match mode {
             Mode::Up => config.up_zoom,
             Mode::Down => config.down_zoom,
@@ -98,6 +109,23 @@ pub fn render(
         body_scripts: scripts,
     };
     doc.render()
+}
+
+/// The `<html>` root classes matching Phase 10.4's toggle-button state,
+/// per the `mud`'s `ViewToggle` -> CSS-class convention (`mud-down.css`/
+/// `mud-up.css`).
+fn html_classes(config: &DocumentConfig) -> Vec<String> {
+    let mut classes = Vec::new();
+    if config.show_line_numbers {
+        classes.push("has-line-numbers".to_string());
+    }
+    if config.wrap_lines {
+        classes.push("has-word-wrap".to_string());
+    }
+    if config.readable_column {
+        classes.push("is-readable-column".to_string());
+    }
+    classes
 }
 
 fn wrapper_class(mode: Mode) -> &'static str {
@@ -234,5 +262,42 @@ mod tests {
         let down_html = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
         assert!(up_html.contains("style=\"zoom: 1.5\""));
         assert!(down_html.contains("style=\"zoom: 0.8\""));
+    }
+
+    /// Extracts the `<html ...>` opening tag's `class="..."` attribute
+    /// value, so assertions check the root element's actual classes rather
+    /// than merely finding the class name as a substring somewhere in the
+    /// document (it also appears inside the embedded CSS's own selectors,
+    /// e.g. `.is-readable-column .down-mode-output { ... }`).
+    fn html_root_class_attr(html: &str) -> &str {
+        let after = html.split_once("class=\"").expect("no class attr").1;
+        after.split_once('"').expect("unterminated class attr").0
+    }
+
+    #[test]
+    fn default_config_html_classes_match_default_preferences() {
+        let html = render(
+            "hi",
+            base_dir(),
+            "notes.md",
+            Mode::Down,
+            0,
+            &DocumentConfig::default(),
+        );
+        let classes = html_root_class_attr(&html);
+        assert_eq!(classes, "has-line-numbers has-word-wrap");
+    }
+
+    #[test]
+    fn toggle_flags_control_html_classes() {
+        let config = DocumentConfig {
+            show_line_numbers: false,
+            wrap_lines: false,
+            readable_column: true,
+            ..DocumentConfig::default()
+        };
+        let html = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
+        let classes = html_root_class_attr(&html);
+        assert_eq!(classes, "is-readable-column");
     }
 }

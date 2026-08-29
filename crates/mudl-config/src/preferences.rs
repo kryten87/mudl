@@ -25,17 +25,24 @@ macro_rules! enum_pref {
         }
 
         impl $name {
-            fn parse(s: &str) -> Option<Self> {
+            pub fn parse(s: &str) -> Option<Self> {
                 match s {
                     $($str => Some(Self::$variant),)+
                     _ => None,
                 }
             }
 
-            fn as_str(self) -> &'static str {
+            pub fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $str),+
                 }
+            }
+
+            /// Every variant, in declaration order — lets a consumer (e.g.
+            /// a GUI dropdown) enumerate the valid set without duplicating
+            /// it.
+            pub fn all() -> Vec<Self> {
+                vec![$(Self::$variant),+]
             }
         }
 
@@ -54,6 +61,7 @@ enum_pref!(Theme {
     Blues => "blues",
     Earthy => "earthy",
     Riot => "riot",
+    System => "system",
 }, default = Earthy);
 
 enum_pref!(FolderOpenBehavior { Index => "index", Tabs => "tabs" }, default = Index);
@@ -411,6 +419,21 @@ mod tests {
     fn unknown_theme_variant_falls_back_to_default() {
         let entries = vec![("theme".to_string(), "not-a-theme".to_string())];
         assert_eq!(Preferences::from_entries(&entries).theme, Theme::default());
+    }
+
+    #[test]
+    fn system_theme_variant_parses() {
+        let entries = vec![("theme".to_string(), "system".to_string())];
+        assert_eq!(Preferences::from_entries(&entries).theme, Theme::System);
+    }
+
+    #[test]
+    fn theme_all_lists_every_variant_and_each_round_trips_through_as_str() {
+        let all = Theme::all();
+        assert_eq!(all.len(), 5);
+        for theme in all {
+            assert_eq!(Theme::parse(theme.as_str()), Some(theme));
+        }
     }
 
     #[test]

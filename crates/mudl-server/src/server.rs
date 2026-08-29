@@ -10,7 +10,7 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -24,18 +24,35 @@ use crate::version::VersionCounter;
 /// Which file `Route::Document` renders, and how — the per-server-instance
 /// identity a `mudl-gui` window/tab (Phase 10.6: one server per document)
 /// supplies when it starts serving.
-#[derive(Debug, Clone)]
+///
+/// `config` is behind a `Mutex` rather than a plain field: Phase 10.4's
+/// theme picker/zoom controls change how the *running* server renders
+/// (e.g. re-navigating the WebView to the same URL after a theme change),
+/// not just the next server instance — so a request in flight and a GUI
+/// control updating the config from another thread both need safe
+/// concurrent access to the same `DocumentSource`.
+#[derive(Debug)]
 pub struct DocumentSource {
     pub path: PathBuf,
-    pub config: DocumentConfig,
+    pub config: Mutex<DocumentConfig>,
 }
 
 impl DocumentSource {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
-            config: DocumentConfig::default(),
+            config: Mutex::new(DocumentConfig::default()),
         }
+    }
+
+    /// Replaces the current rendering config; the next request (or the
+    /// next `/wait`-triggered reload) picks it up.
+    pub fn set_config(&self, config: DocumentConfig) {
+        *self.config.lock().unwrap() = config;
+    }
+
+    fn config_snapshot(&self) -> DocumentConfig {
+        self.config.lock().unwrap().clone()
     }
 }
 
@@ -152,13 +169,14 @@ fn serve_document(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
 
+    let config = document.config_snapshot();
     let html = document::render(
         &markdown,
         base_dir,
         &title,
         mode,
         version.current(),
-        &document.config,
+        &config,
     );
     http::format_response(200, &[("Content-Type", "text/html")], html.as_bytes())
 }
@@ -317,6 +335,23 @@ mod respond_to_tests {
         assert!(text.contains("Content-Type: text/html"));
         assert!(text.contains("<h1"));
         assert!(text.contains("up-mode-output"));
+    }
+
+    #[test]
+    fn set_config_changes_what_the_next_request_renders() {
+        let version = VersionCounter::new();
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", b"# Hello".to_vec());
+        let document = document_source();
+
+        document.set_config(DocumentConfig {
+            theme_css_name: "theme-riot.css",
+            ..DocumentConfig::default()
+        });
+
+        let response = respond_to(&req("/"), &version, &filesystem, &document);
+        let text = String::from_utf8_lossy(&response).into_owned();
+        assert!(text.contains("Theme: Riot"));
     }
 
     #[test]

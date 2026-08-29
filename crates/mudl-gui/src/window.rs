@@ -1,15 +1,18 @@
-//! The GTK3 + WebKit2GTK window (Phase 10.1-10.2 of
-//! `docs/IMPLEMENTATION-PLAN.md`): one `gtk::ApplicationWindow` containing
-//! one `webkit2gtk::WebView`, pointed at a `mudl-server` instance started
-//! for the given file, with a Space-bar Up/Down mode toggle.
+//! The GTK3 + WebKit2GTK window (Phases 10.1-10.4 of
+//! `docs/IMPLEMENTATION-PLAN.md`): a `gtk::ApplicationWindow` containing a
+//! toolbar, an outline sidebar, and a `webkit2gtk::WebView`, pointed at a
+//! `mudl-server` instance started for the given file, with a Space-bar
+//! Up/Down mode toggle.
 //!
 //! This is GTK signal wiring and WebKit navigation, not algorithmic logic —
 //! per the plan's own note on Phase 10, there's no pure decision to extract
 //! here beyond the mode flip itself (`crate::toggle::next_mode`, unit
-//! tested on its own), so this module has no unit tests; it's verified by
-//! the manual smoke-test checklist the plan prescribes for this phase.
+//! tested on its own) and the preferences/document-config mapping
+//! (`crate::config`, `crate::sidebar::navigation_script`, also unit
+//! tested), so this module itself has no unit tests; it's verified by the
+//! manual smoke-test checklist the plan prescribes for this phase.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -20,8 +23,10 @@ use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::WebViewExt;
 
+use mudl_config::Preferences;
 use mudl_core::headings::extract_headings;
 use mudl_core::outline;
+use mudl_server::document::DocumentConfig;
 use mudl_server::fs::RealFileSystem;
 use mudl_server::routes::Mode;
 use mudl_server::server::{self, DocumentSource};
@@ -29,6 +34,7 @@ use mudl_server::version::VersionCounter;
 
 use crate::sidebar;
 use crate::toggle::next_mode;
+use crate::toolbar;
 
 const APP_ID: &str = "com.monstergfx.mudl";
 
@@ -54,10 +60,26 @@ pub fn run(path: PathBuf) -> Result<(), String> {
     // the same reason once it navigates to the server).
     let markdown = std::fs::read_to_string(&absolute).unwrap_or_default();
 
-    let addr = start_server_for(absolute)?;
+    let prefs_path = preferences_path();
+    let prefs = Rc::new(RefCell::new(mudl_config::load(
+        &mudl_config::RealFileSystem,
+        &prefs_path,
+    )));
+    let initial_config = crate::config::document_config(&prefs.borrow());
+
+    let (addr, document) = start_server_for(absolute, initial_config)?;
 
     let application = gtk::Application::new(Some(APP_ID), gtk::gio::ApplicationFlags::empty());
-    application.connect_activate(move |app| build_window(app, addr, &markdown));
+    application.connect_activate(move |app| {
+        build_window(
+            app,
+            addr,
+            &markdown,
+            Rc::clone(&prefs),
+            &prefs_path,
+            Arc::clone(&document),
+        );
+    });
 
     // No CLI args of ours are meaningful to GTK/GApplication's own option
     // parsing, so run with an empty argv rather than `run()`'s default of
@@ -68,7 +90,24 @@ pub fn run(path: PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-fn build_window(app: &gtk::Application, addr: SocketAddr, markdown: &str) {
+/// `~/.config/mudl/preferences` — matches `mudl-config`'s documented
+/// on-disk location (Phase 7.1). Falls back to a relative path if `$HOME`
+/// isn't set (e.g. an unusual test/container environment) rather than
+/// panicking; `mudl_config::load` already treats a missing/unreadable file
+/// as "use defaults", so a wrong-but-harmless path degrades gracefully.
+fn preferences_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".config/mudl/preferences")
+}
+
+fn build_window(
+    app: &gtk::Application,
+    addr: SocketAddr,
+    markdown: &str,
+    prefs: Rc<RefCell<Preferences>>,
+    prefs_path: &std::path::Path,
+    document: Arc<DocumentSource>,
+) {
     let window = gtk::ApplicationWindow::new(app);
     window.set_title("mudl");
     window.set_default_size(960, 720);
@@ -77,16 +116,17 @@ fn build_window(app: &gtk::Application, addr: SocketAddr, markdown: &str) {
     webview.load_uri(&format!("http://{addr}/"));
 
     // The mode a Space-bar press toggles *from*, shared with the sidebar's
-    // row-activation handler so it knows whether to navigate by `#slug`
-    // (Up) or by `data-line` (Down) — and the scroll fraction captured just
-    // before a mode-toggle navigation, restored by the load-changed
-    // handler once the new page loads. All three live in `Rc<Cell<_>>`,
-    // shared across closures on GTK's single-threaded main loop (`Rc`, not
-    // `Arc`, is the right tool here).
+    // row-activation handler and the toolbar (both need to know whether
+    // Up- or Down-mode preferences/navigation apply) — and the scroll
+    // fraction captured just before a mode-toggle navigation, restored by
+    // the load-changed handler once the new page loads. All of these live
+    // in `Rc<Cell<_>>`/`Rc<RefCell<_>>`, shared across closures on GTK's
+    // single-threaded main loop (`Rc`, not `Arc`, is the right tool here).
     let mode = Rc::new(Cell::new(Mode::Up));
     let pending_scroll_fraction = Rc::new(Cell::new(0.0_f64));
 
     connect_scroll_restore(&webview, Rc::clone(&pending_scroll_fraction));
+    connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
     connect_mode_toggle(
         &window,
         &webview,
@@ -98,7 +138,7 @@ fn build_window(app: &gtk::Application, addr: SocketAddr, markdown: &str) {
     let headings = extract_headings(markdown);
     let outline_tree = outline::build_tree(&headings);
     let sidebar_view = sidebar::build_outline_tree_view(&outline_tree);
-    connect_sidebar_navigation(&sidebar_view, &webview, mode);
+    connect_sidebar_navigation(&sidebar_view, &webview, Rc::clone(&mode));
 
     let sidebar_scroller =
         gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
@@ -109,7 +149,21 @@ fn build_window(app: &gtk::Application, addr: SocketAddr, markdown: &str) {
     paned.pack1(&sidebar_scroller, false, false);
     paned.pack2(&webview, true, true);
 
-    window.add(&paned);
+    let toolbar_ctx = toolbar::Context {
+        webview: webview.clone(),
+        mode,
+        prefs,
+        prefs_path: prefs_path.to_path_buf(),
+        document,
+        addr,
+    };
+    let toolbar_widget = toolbar::build(&toolbar_ctx);
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.pack_start(&toolbar_widget, false, false, 0);
+    vbox.pack_start(&paned, true, true, 0);
+
+    window.add(&vbox);
     window.show_all();
 }
 
@@ -126,6 +180,30 @@ fn connect_scroll_restore(webview: &webkit2gtk::WebView, pending_scroll_fraction
             "window.scrollTo(0, {fraction} * (document.body.scrollHeight - window.innerHeight));"
         );
         webview.evaluate_javascript(&script, None, None, None::<&gtk::gio::Cancellable>, |_| {});
+    });
+}
+
+/// After every finished page load, applies the current mode's persisted
+/// zoom level via WebKit's own zoom API (Phase 10.4) — needed on every
+/// load, not just once, since a mode toggle or theme change re-navigates
+/// to a fresh page that otherwise starts back at WebKit's default zoom.
+fn connect_zoom_restore(
+    webview: &webkit2gtk::WebView,
+    mode: Rc<Cell<Mode>>,
+    prefs: Rc<RefCell<Preferences>>,
+) {
+    webview.connect_load_changed(move |webview, event| {
+        if event != webkit2gtk::LoadEvent::Finished {
+            return;
+        }
+        let zoom = {
+            let prefs = prefs.borrow();
+            match mode.get() {
+                Mode::Up => prefs.up_mode_zoom_level,
+                Mode::Down => prefs.down_mode_zoom_level,
+            }
+        };
+        webview.set_zoom_level(zoom);
     });
 }
 
@@ -196,10 +274,15 @@ fn connect_sidebar_navigation(
     });
 }
 
-/// Binds a `mudl-server` instance for `path` and runs its accept loop on a
-/// background thread. Returns the address it's listening on so the WebView
-/// can navigate to it.
-fn start_server_for(path: PathBuf) -> Result<SocketAddr, String> {
+/// Binds a `mudl-server` instance for `path`, seeds it with `config`, and
+/// runs its accept loop on a background thread. Returns the address it's
+/// listening on (so the WebView can navigate to it) and the shared
+/// `DocumentSource` handle (so the toolbar can update its config live —
+/// Phase 10.4).
+fn start_server_for(
+    path: PathBuf,
+    config: DocumentConfig,
+) -> Result<(SocketAddr, Arc<DocumentSource>), String> {
     let listener = server::bind().map_err(|err| format!("failed to start local server: {err}"))?;
     let addr = listener
         .local_addr()
@@ -208,8 +291,10 @@ fn start_server_for(path: PathBuf) -> Result<SocketAddr, String> {
     let version = VersionCounter::new();
     let filesystem = Arc::new(RealFileSystem);
     let document = Arc::new(DocumentSource::new(path));
+    document.set_config(config);
 
-    thread::spawn(move || server::serve(listener, version, filesystem, document));
+    let document_for_thread = Arc::clone(&document);
+    thread::spawn(move || server::serve(listener, version, filesystem, document_for_thread));
 
-    Ok(addr)
+    Ok((addr, document))
 }
