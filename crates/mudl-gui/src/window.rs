@@ -16,8 +16,9 @@
 //! This is GTK signal wiring and WebKit navigation, not algorithmic logic —
 //! per the plan's own note on Phase 10, there's no pure decision to extract
 //! here beyond the mode flip itself (`crate::toggle::next_mode`, unit
-//! tested on its own) and the preferences/document-config mapping
+//! tested on its own), the preferences/document-config mapping
 //! (`crate::config`, `crate::sidebar::navigation_script`, also unit
+//! tested), and link-click classification (`crate::linkaction`, also unit
 //! tested), so this module itself has no unit tests; it's verified by the
 //! manual smoke-test checklist the plan prescribes for this phase.
 
@@ -30,7 +31,10 @@ use std::thread;
 
 use gtk::prelude::*;
 use javascriptcore::ValueExt;
-use webkit2gtk::WebViewExt;
+use webkit2gtk::{
+    NavigationPolicyDecisionExt, PolicyDecisionExt, PolicyDecisionType, URIRequestExt,
+    WebViewExt,
+};
 
 use mudl_config::Preferences;
 use mudl_core::headings::extract_headings;
@@ -251,6 +255,7 @@ fn build_tab(tab: &TabSource, prefs: Rc<RefCell<Preferences>>, prefs_path: &Path
 
     connect_scroll_restore(&webview, Rc::clone(&pending_scroll_fraction));
     connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
+    connect_link_navigation(&webview, addr);
 
     let headings = extract_headings(&tab.markdown);
     let outline_tree = outline::build_tree(&headings);
@@ -342,6 +347,84 @@ fn connect_zoom_restore(
         };
         webview.set_zoom_level(zoom);
     });
+}
+
+/// Intercepts every link-click navigation the WebView reports
+/// (`WebKitNavigationType::LinkClicked`) and, per `crate::linkaction::classify`,
+/// either lets WebKit apply its own default policy (in-page anchors, this
+/// tab's own `mudl-server` pages) or takes over: spawns a new `mudl` window
+/// for a local `.md`/`.markdown` link, hands an `http(s)://`/`mailto:` link
+/// to the OS's default browser/mail client, or hands any other local file
+/// to `xdg-open`.
+fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr) {
+    let server_addr = addr.to_string();
+    webview.connect_decide_policy(move |_webview, decision, decision_type| {
+        if decision_type != PolicyDecisionType::NavigationAction {
+            return false;
+        }
+        let Some(nav_decision) =
+            decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
+        else {
+            return false;
+        };
+        let Some(action) = nav_decision.navigation_action() else {
+            return false;
+        };
+        if action.navigation_type() != webkit2gtk::NavigationType::LinkClicked {
+            return false;
+        }
+        let Some(uri) = action.request().and_then(|request| request.uri()) else {
+            return false;
+        };
+
+        match crate::linkaction::classify(&uri, &server_addr) {
+            crate::linkaction::LinkAction::Default => false,
+            crate::linkaction::LinkAction::OpenNewWindow(path) => {
+                decision.ignore();
+                open_in_new_window(&path);
+                true
+            }
+            crate::linkaction::LinkAction::OpenExternally(uri) => {
+                decision.ignore();
+                let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                    &uri,
+                    gtk::gio::AppLaunchContext::NONE,
+                );
+                true
+            }
+            crate::linkaction::LinkAction::OpenWithSystemDefault(path) => {
+                decision.ignore();
+                let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                true
+            }
+        }
+    });
+}
+
+/// Opens `path` in a brand-new `mudl` window by re-exec'ing this same
+/// binary with the child-marker env var set directly — skipping
+/// `mudl-cli`'s own detach-and-re-exec step (this process is already
+/// detached), so the new process goes straight into `mudl_gui::launch`.
+/// The literal `"MUDL_GUI_CHILD"` must match
+/// `crates/mudl-cli/src/main.rs::GUI_CHILD_ENV` — there's no shared
+/// constant since `mudl-gui` doesn't depend on `mudl-cli`.
+///
+/// There's no cross-process "focus the existing window for this file"
+/// mechanism (Phase 10.6's `NON_UNIQUE` `GApplication` flag rules out
+/// GApplication's own D-Bus activation for that), so this always opens a
+/// new window, even for a link back to the file already open.
+fn open_in_new_window(path: &Path) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let _ = std::process::Command::new(exe)
+        .arg(target)
+        .env("MUDL_GUI_CHILD", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Space bar: captures the current scroll fraction, flips `mode`, and

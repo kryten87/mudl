@@ -4,6 +4,7 @@
 mod config;
 mod find;
 mod geometry;
+mod linkaction;
 mod sidebar;
 mod toggle;
 mod toolbar;

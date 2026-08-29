@@ -78,7 +78,10 @@ fn parse_since(raw: Option<&String>) -> Option<u64> {
     }
 }
 
-fn percent_decode(input: &str) -> Option<String> {
+/// Public so `mudl-gui`'s link-navigation handler (`/local-md/`,
+/// `/local-file/`) can decode the same percent-encoding `mudl-core::template`
+/// uses to build those hrefs, without duplicating this logic.
+pub fn percent_decode(input: &str) -> Option<String> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
