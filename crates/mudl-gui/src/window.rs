@@ -143,11 +143,13 @@ pub fn run(paths: &[PathBuf]) -> Result<(), String> {
     // turn them into the `gio::File`s `open` receives above (and forwards
     // to an already-running primary instance) — unlike the empty argv this
     // used to pass under `connect_activate`, which never went through
-    // GApplication's own file/single-instance handling at all.
-    let argv: Vec<String> = paths
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect();
+    // GApplication's own file/single-instance handling at all. A leading
+    // placeholder element is required: like a real `argv`, index 0 is
+    // taken as the program name and skipped by GLib's arg parsing — without
+    // it, the first (often only) path is mistaken for the program name
+    // instead of a file to open, so `open` never fires.
+    let mut argv: Vec<String> = vec!["mudl".to_string()];
+    argv.extend(paths.iter().map(|path| path.to_string_lossy().into_owned()));
     application.run_with_args(&argv);
     Ok(())
 }
