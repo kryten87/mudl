@@ -1,27 +1,43 @@
-//! The minimal GTK3 + WebKit2GTK window (Phase 10.1 of
+//! The GTK3 + WebKit2GTK window (Phase 10.1-10.2 of
 //! `docs/IMPLEMENTATION-PLAN.md`): one `gtk::ApplicationWindow` containing
 //! one `webkit2gtk::WebView`, pointed at a `mudl-server` instance started
-//! for the given file.
+//! for the given file, with a Space-bar Up/Down mode toggle.
 //!
 //! This is GTK signal wiring and WebKit navigation, not algorithmic logic —
 //! per the plan's own note on Phase 10, there's no pure decision to extract
-//! here (unlike 10.2's `toggle::next_mode`), so this module has no unit
-//! tests; it's verified by the manual smoke-test checklist the plan
-//! prescribes for this phase.
+//! here beyond the mode flip itself (`crate::toggle::next_mode`, unit
+//! tested on its own), so this module has no unit tests; it's verified by
+//! the manual smoke-test checklist the plan prescribes for this phase.
 
+use std::cell::Cell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
 
 use gtk::prelude::*;
+use javascriptcore::ValueExt;
 use webkit2gtk::WebViewExt;
 
 use mudl_server::fs::RealFileSystem;
+use mudl_server::routes::Mode;
 use mudl_server::server::{self, DocumentSource};
 use mudl_server::version::VersionCounter;
 
+use crate::toggle::next_mode;
+
 const APP_ID: &str = "com.monstergfx.mudl";
+
+/// Reports the current scroll position as a fraction of the scrollable
+/// height: `0.0` at the top, `1.0` at the bottom, `0.0` when the page
+/// doesn't scroll at all (avoids a divide-by-zero rather than reporting
+/// `NaN`/`Infinity`).
+const CAPTURE_SCROLL_FRACTION_JS: &str = "\
+(function () {
+  var max = document.body.scrollHeight - window.innerHeight;
+  return max > 0 ? window.scrollY / max : 0;
+})();";
 
 /// Starts a `mudl-server` instance serving `path` and opens a window
 /// pointed at it. Blocks until the window is closed — `gtk::Application::run`
@@ -33,16 +49,7 @@ pub fn run(path: PathBuf) -> Result<(), String> {
     let addr = start_server_for(absolute)?;
 
     let application = gtk::Application::new(Some(APP_ID), gtk::gio::ApplicationFlags::empty());
-    application.connect_activate(move |app| {
-        let window = gtk::ApplicationWindow::new(app);
-        window.set_title("mudl");
-        window.set_default_size(960, 720);
-
-        let webview = webkit2gtk::WebView::new();
-        webview.load_uri(&format!("http://{addr}/"));
-        window.add(&webview);
-        window.show_all();
-    });
+    application.connect_activate(move |app| build_window(app, addr));
 
     // No CLI args of ours are meaningful to GTK/GApplication's own option
     // parsing, so run with an empty argv rather than `run()`'s default of
@@ -51,6 +58,92 @@ pub fn run(path: PathBuf) -> Result<(), String> {
     // reason to hand them to GApplication a second time).
     application.run_with_args::<&str>(&[]);
     Ok(())
+}
+
+fn build_window(app: &gtk::Application, addr: SocketAddr) {
+    let window = gtk::ApplicationWindow::new(app);
+    window.set_title("mudl");
+    window.set_default_size(960, 720);
+
+    let webview = webkit2gtk::WebView::new();
+    webview.load_uri(&format!("http://{addr}/"));
+
+    // The mode a Space-bar press toggles *from*, and the scroll fraction
+    // captured just before that toggle's navigation — both need to survive
+    // from the key-press handler to the load-changed handler that restores
+    // scroll position on the new page, so both live in `Rc<Cell<_>>` shared
+    // between the two closures (GTK's main loop is single-threaded; `Rc`,
+    // not `Arc`, is the right tool here).
+    let mode = Rc::new(Cell::new(Mode::Up));
+    let pending_scroll_fraction = Rc::new(Cell::new(0.0_f64));
+
+    connect_scroll_restore(&webview, Rc::clone(&pending_scroll_fraction));
+    connect_mode_toggle(&window, &webview, addr, mode, pending_scroll_fraction);
+
+    window.add(&webview);
+    window.show_all();
+}
+
+/// After every finished page load, scrolls to whatever fraction was
+/// captured before the navigation that produced it (`0.0` — the top — on
+/// the very first load, since nothing has been captured yet).
+fn connect_scroll_restore(webview: &webkit2gtk::WebView, pending_scroll_fraction: Rc<Cell<f64>>) {
+    webview.connect_load_changed(move |webview, event| {
+        if event != webkit2gtk::LoadEvent::Finished {
+            return;
+        }
+        let fraction = pending_scroll_fraction.get();
+        let script = format!(
+            "window.scrollTo(0, {fraction} * (document.body.scrollHeight - window.innerHeight));"
+        );
+        webview.evaluate_javascript(&script, None, None, None::<&gtk::gio::Cancellable>, |_| {});
+    });
+}
+
+/// Space bar: captures the current scroll fraction, flips `mode`, and
+/// re-navigates the WebView to `/` with `?mode=down` when the new mode is
+/// Down (its absence already means Up — see `mudl_server::routes::dispatch`).
+fn connect_mode_toggle(
+    window: &gtk::ApplicationWindow,
+    webview: &webkit2gtk::WebView,
+    addr: SocketAddr,
+    mode: Rc<Cell<Mode>>,
+    pending_scroll_fraction: Rc<Cell<f64>>,
+) {
+    let webview = webview.clone();
+    window.connect_key_press_event(move |_window, event| {
+        if event.keyval() != gtk::gdk::keys::constants::space {
+            return gtk::glib::Propagation::Proceed;
+        }
+
+        let webview_for_nav = webview.clone();
+        let mode = Rc::clone(&mode);
+        let pending_scroll_fraction = Rc::clone(&pending_scroll_fraction);
+        webview.evaluate_javascript(
+            CAPTURE_SCROLL_FRACTION_JS,
+            None,
+            None,
+            None::<&gtk::gio::Cancellable>,
+            move |result| {
+                let fraction = result
+                    .ok()
+                    .filter(|value| value.is_number())
+                    .map(|value| value.to_double())
+                    .unwrap_or(0.0);
+                pending_scroll_fraction.set(fraction);
+
+                let next = next_mode(mode.get());
+                mode.set(next);
+                let path = match next {
+                    Mode::Up => "/",
+                    Mode::Down => "/?mode=down",
+                };
+                webview_for_nav.load_uri(&format!("http://{addr}{path}"));
+            },
+        );
+
+        gtk::glib::Propagation::Stop
+    });
 }
 
 /// Binds a `mudl-server` instance for `path` and runs its accept loop on a

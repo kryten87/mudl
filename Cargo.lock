@@ -452,6 +452,7 @@ name = "mudl-gui"
 version = "0.1.0"
 dependencies = [
  "gtk",
+ "javascriptcore-rs",
  "mudl-server",
  "webkit2gtk",
 ]

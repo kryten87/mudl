@@ -1,6 +1,7 @@
 //! GTK3 + WebKit2GTK application shell (Phase 10 of
 //! `docs/IMPLEMENTATION-PLAN.md`).
 
+mod toggle;
 mod window;
 
 use std::path::PathBuf;
