@@ -196,9 +196,22 @@ fn build_window(
     }
     connect_geometry_save(&window, geometry_path, geometry_key);
 
+    // Shared with every tab's link-click handler so a link back to a file
+    // already open in *this* window (Phase 10.6's self-link case) can
+    // switch to that tab and raise the window instead of spawning a
+    // redundant new process — see `focus_or_open_window`.
+    let tab_paths: Rc<Vec<PathBuf>> = Rc::new(tabs.iter().map(|tab| tab.path.clone()).collect());
+
     let notebook = gtk::Notebook::new();
     for tab in tabs {
-        let tab_widget = build_tab(tab, Rc::clone(&prefs), prefs_path);
+        let tab_widget = build_tab(
+            tab,
+            Rc::clone(&prefs),
+            prefs_path,
+            &window,
+            &notebook,
+            Rc::clone(&tab_paths),
+        );
         let label = gtk::Label::new(Some(&tab.title));
         notebook.append_page(&tab_widget, Some(&label));
     }
@@ -238,7 +251,14 @@ fn connect_geometry_save(
 /// the find-bar overlay, wired together and pointed at `tab`'s server
 /// instance. Returns the tab's root widget, ready to hand to
 /// `gtk::Notebook::append_page`.
-fn build_tab(tab: &TabSource, prefs: Rc<RefCell<Preferences>>, prefs_path: &Path) -> gtk::Box {
+fn build_tab(
+    tab: &TabSource,
+    prefs: Rc<RefCell<Preferences>>,
+    prefs_path: &Path,
+    window: &gtk::ApplicationWindow,
+    notebook: &gtk::Notebook,
+    tab_paths: Rc<Vec<PathBuf>>,
+) -> gtk::Box {
     let addr = tab.addr;
     let webview = webkit2gtk::WebView::new();
     webview.load_uri(&format!("http://{addr}/"));
@@ -255,7 +275,7 @@ fn build_tab(tab: &TabSource, prefs: Rc<RefCell<Preferences>>, prefs_path: &Path
 
     connect_scroll_restore(&webview, Rc::clone(&pending_scroll_fraction));
     connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
-    connect_link_navigation(&webview, addr);
+    connect_link_navigation(&webview, addr, window.clone(), notebook.clone(), tab_paths);
 
     let headings = extract_headings(&tab.markdown);
     let outline_tree = outline::build_tree(&headings);
@@ -352,11 +372,17 @@ fn connect_zoom_restore(
 /// Intercepts every link-click navigation the WebView reports
 /// (`WebKitNavigationType::LinkClicked`) and, per `crate::linkaction::classify`,
 /// either lets WebKit apply its own default policy (in-page anchors, this
-/// tab's own `mudl-server` pages) or takes over: spawns a new `mudl` window
-/// for a local `.md`/`.markdown` link, hands an `http(s)://`/`mailto:` link
-/// to the OS's default browser/mail client, or hands any other local file
-/// to `xdg-open`.
-fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr) {
+/// tab's own `mudl-server` pages) or takes over: focuses this window's own
+/// tab (or spawns a new `mudl` window) for a local `.md`/`.markdown` link,
+/// hands an `http(s)://`/`mailto:` link to the OS's default browser/mail
+/// client, or hands any other local file to `xdg-open`.
+fn connect_link_navigation(
+    webview: &webkit2gtk::WebView,
+    addr: SocketAddr,
+    window: gtk::ApplicationWindow,
+    notebook: gtk::Notebook,
+    tab_paths: Rc<Vec<PathBuf>>,
+) {
     let server_addr = addr.to_string();
     webview.connect_decide_policy(move |_webview, decision, decision_type| {
         if decision_type != PolicyDecisionType::NavigationAction {
@@ -381,7 +407,7 @@ fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr) {
             crate::linkaction::LinkAction::Default => false,
             crate::linkaction::LinkAction::OpenNewWindow(path) => {
                 decision.ignore();
-                open_in_new_window(&path);
+                focus_or_open_window(&path, &window, &notebook, &tab_paths);
                 true
             }
             crate::linkaction::LinkAction::OpenExternally(uri) => {
@@ -401,6 +427,30 @@ fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr) {
     });
 }
 
+/// If `path` (a `.md`/`.markdown` link target) matches one of this
+/// window's own open tabs, switches to that tab and raises the window
+/// instead of spawning a redundant new process — covers a link back to the
+/// file already open (or to another file already open in a sibling tab of
+/// the same window). There's still no cross-process "focus the existing
+/// window" mechanism for a file open in a *different* `mudl` window/process
+/// (Phase 10.6's `NON_UNIQUE` `GApplication` flag rules out GApplication's
+/// own D-Bus activation for that, and there's no separate IPC registry), so
+/// that case still falls through to `open_in_new_window`.
+fn focus_or_open_window(
+    path: &Path,
+    window: &gtk::ApplicationWindow,
+    notebook: &gtk::Notebook,
+    tab_paths: &[PathBuf],
+) {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(index) = tab_paths.iter().position(|tab_path| *tab_path == canonical) {
+        notebook.set_current_page(Some(index as u32));
+        window.present();
+        return;
+    }
+    open_in_new_window(path);
+}
+
 /// Opens `path` in a brand-new `mudl` window by re-exec'ing this same
 /// binary with the child-marker env var set directly — skipping
 /// `mudl-cli`'s own detach-and-re-exec step (this process is already
@@ -408,11 +458,6 @@ fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr) {
 /// The literal `"MUDL_GUI_CHILD"` must match
 /// `crates/mudl-cli/src/main.rs::GUI_CHILD_ENV` — there's no shared
 /// constant since `mudl-gui` doesn't depend on `mudl-cli`.
-///
-/// There's no cross-process "focus the existing window for this file"
-/// mechanism (Phase 10.6's `NON_UNIQUE` `GApplication` flag rules out
-/// GApplication's own D-Bus activation for that), so this always opens a
-/// new window, even for a link back to the file already open.
 fn open_in_new_window(path: &Path) {
     let Ok(exe) = std::env::current_exe() else {
         return;
