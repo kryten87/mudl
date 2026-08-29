@@ -68,6 +68,29 @@ const CAPTURE_SCROLL_FRACTION_JS: &str = "\
   return max > 0 ? window.scrollY / max : 0;
 })();";
 
+/// One currently-open window, tracked in a process-wide `Registry` so a
+/// request to open a file already showing in one of its tabs can raise
+/// that window and select the tab instead of opening a redundant new one.
+struct OpenWindow {
+    window: gtk::ApplicationWindow,
+    notebook: gtk::Notebook,
+    /// Index-aligned with `notebook`'s pages. Only ever grows by whole new
+    /// windows (Phase 10.6 tabs aren't added to a window after it's built),
+    /// so an index found here stays valid for `notebook`'s lifetime.
+    tab_paths: Rc<RefCell<Vec<PathBuf>>>,
+}
+
+/// Every window open in this process. With `ApplicationFlags::HANDLES_OPEN`
+/// and no `NON_UNIQUE` (see `run`), every `mudl` invocation that requests a
+/// file — this process's own initial launch, a later `mudl <file>` typed in
+/// a fresh terminal, or a link-click's re-exec (`open_in_new_window`) —
+/// ends up as a single `open` call routed to whichever process is already
+/// running as the primary instance. So one process-wide registry, checked
+/// by both `connect_open`'s handler and every tab's link-click handler, is
+/// enough to recognize "this file is already open" across *any* window,
+/// not just the one the request originated from.
+type Registry = Rc<RefCell<Vec<OpenWindow>>>;
+
 /// One file's server instance, started before the window exists so a
 /// failure to bind/canonicalize/read is reported before any GTK state is
 /// touched.
@@ -99,34 +122,98 @@ pub fn run(paths: &[PathBuf]) -> Result<(), String> {
         &mudl_config::RealFileSystem,
         &prefs_path,
     )));
+    let registry: Registry = Rc::new(RefCell::new(Vec::new()));
 
-    let mut tabs = Vec::with_capacity(paths.len());
-    for path in paths {
-        tabs.push(start_tab_source(path, &prefs.borrow())?);
-    }
-
-    // `NON_UNIQUE`: without it, GApplication treats every process sharing
-    // `APP_ID` as one single-instance app — a second `mudl` invocation
-    // would just send an `activate` signal to the already-running first
-    // process (over D-Bus) instead of running its own GTK app, so the
-    // "new" window would actually be `build_window` re-running in the
-    // original process with the original process's `tabs`, i.e. the first
-    // file ever opened. Each invocation must run fully independently.
-    let application = gtk::Application::new(
-        Some(APP_ID),
-        gtk::gio::ApplicationFlags::NON_UNIQUE,
-    );
-    application.connect_activate(move |app| {
-        build_window(app, &tabs, Rc::clone(&prefs), &prefs_path);
+    // `HANDLES_OPEN` (deliberately no `NON_UNIQUE`): GApplication's default
+    // command-line handling treats positional args as files and calls
+    // `open` (below) rather than `activate` — for both this process, if it
+    // becomes the primary instance, and for any later `mudl` invocation
+    // sharing `APP_ID`, which GApplication instead forwards over D-Bus to
+    // this already-running primary instance's `open` handler and exits
+    // without ever running its own GTK app. That's what makes "focus the
+    // window already showing this file" possible across *any* window this
+    // app has open, not just the one a link was clicked in.
+    let application = gtk::Application::new(Some(APP_ID), gtk::gio::ApplicationFlags::HANDLES_OPEN);
+    application.connect_open(move |app, files, _hint| {
+        let requested: Vec<PathBuf> = files.iter().filter_map(|file| file.path()).collect();
+        open_files(app, &requested, &registry, &prefs, &prefs_path);
     });
 
-    // No CLI args of ours are meaningful to GTK/GApplication's own option
-    // parsing, so run with an empty argv rather than `run()`'s default of
-    // forwarding `std::env::args()` (mudl's own flags like `-u`/`-d` are
-    // already consumed by mudl-cli before this ever runs, but there's no
-    // reason to hand them to GApplication a second time).
-    application.run_with_args::<&str>(&[]);
+    // Passing `paths` as argv is what lets GApplication's own file handling
+    // turn them into the `gio::File`s `open` receives above (and forwards
+    // to an already-running primary instance) — unlike the empty argv this
+    // used to pass under `connect_activate`, which never went through
+    // GApplication's own file/single-instance handling at all.
+    let argv: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    application.run_with_args(&argv);
     Ok(())
+}
+
+/// Handles one GApplication `open` request (Phase 10.6): each requested
+/// file already showing in some window's tab (per `registry`) gets that
+/// window raised and the tab selected instead of a redundant new one;
+/// everything else is grouped into a single new window with one tab per
+/// requested-but-not-yet-open file, mirroring the original "one `mudl
+/// file1 file2` invocation, one window, one tab per file" behavior.
+fn open_files(
+    app: &gtk::Application,
+    requested: &[PathBuf],
+    registry: &Registry,
+    prefs: &Rc<RefCell<Preferences>>,
+    prefs_path: &Path,
+) {
+    let mut new_paths = Vec::new();
+    for path in requested {
+        if !focus_if_already_open(path, registry) {
+            new_paths.push(path.clone());
+        }
+    }
+    if new_paths.is_empty() {
+        return;
+    }
+
+    let mut tabs = Vec::with_capacity(new_paths.len());
+    for path in &new_paths {
+        match start_tab_source(path, &prefs.borrow()) {
+            Ok(tab) => tabs.push(tab),
+            // Best-effort per file, same as a `mudl file1 file2` launch
+            // where only one of them fails to read: the rest still open
+            // rather than the whole request being abandoned. This message
+            // still only reaches a real terminal if this happens to be the
+            // very first `mudl` invocation run without the usual detach
+            // (`spawn_detached_gui` otherwise redirects stderr to
+            // `/dev/null` before this ever runs).
+            Err(message) => eprintln!("mudl: {message}"),
+        }
+    }
+    if tabs.is_empty() {
+        return;
+    }
+
+    build_window(app, &tabs, Rc::clone(prefs), prefs_path, registry);
+}
+
+/// If `path` (canonicalized) matches a tab in any window `registry` knows
+/// about, raises that window and selects the tab, returning `true`.
+fn focus_if_already_open(path: &Path, registry: &Registry) -> bool {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let focused = registry.borrow().iter().find_map(|entry| {
+        let index = entry
+            .tab_paths
+            .borrow()
+            .iter()
+            .position(|tab_path| *tab_path == canonical)?;
+        Some((entry.window.clone(), entry.notebook.clone(), index))
+    });
+    let Some((window, notebook, index)) = focused else {
+        return false;
+    };
+    notebook.set_current_page(Some(index as u32));
+    window.present();
+    true
 }
 
 /// `~/.config/mudl/preferences` — matches `mudl-config`'s documented
@@ -176,6 +263,7 @@ fn build_window(
     tabs: &[TabSource],
     prefs: Rc<RefCell<Preferences>>,
     prefs_path: &Path,
+    registry: &Registry,
 ) {
     let window = gtk::ApplicationWindow::new(app);
     window.set_title("mudl");
@@ -196,28 +284,25 @@ fn build_window(
     }
     connect_geometry_save(&window, geometry_path, geometry_key);
 
-    // Shared with every tab's link-click handler so a link back to a file
-    // already open in *this* window (Phase 10.6's self-link case) can
-    // switch to that tab and raise the window instead of spawning a
-    // redundant new process — see `focus_or_open_window`.
-    let tab_paths: Rc<Vec<PathBuf>> = Rc::new(tabs.iter().map(|tab| tab.path.clone()).collect());
-
     let notebook = gtk::Notebook::new();
     for tab in tabs {
-        let tab_widget = build_tab(
-            tab,
-            Rc::clone(&prefs),
-            prefs_path,
-            &window,
-            &notebook,
-            Rc::clone(&tab_paths),
-        );
+        let tab_widget = build_tab(tab, Rc::clone(&prefs), prefs_path, registry);
         let label = gtk::Label::new(Some(&tab.title));
         notebook.append_page(&tab_widget, Some(&label));
     }
 
     window.add(&notebook);
     window.show_all();
+
+    let tab_paths = Rc::new(RefCell::new(
+        tabs.iter().map(|tab| tab.path.clone()).collect(),
+    ));
+    connect_registry_cleanup(&window, Rc::clone(registry), Rc::clone(&tab_paths));
+    registry.borrow_mut().push(OpenWindow {
+        window,
+        notebook,
+        tab_paths,
+    });
 }
 
 /// On close, saves the window's current size/position keyed by
@@ -247,6 +332,24 @@ fn connect_geometry_save(
     });
 }
 
+/// On close, drops this window's entry from `registry` so a later request
+/// for one of its files opens a fresh window instead of trying to raise a
+/// window that no longer exists. `tab_paths` — the same `Rc` pushed onto
+/// `registry` for this window — identifies which entry is this window's,
+/// since GTK widgets don't implement equality.
+fn connect_registry_cleanup(
+    window: &gtk::ApplicationWindow,
+    registry: Registry,
+    tab_paths: Rc<RefCell<Vec<PathBuf>>>,
+) {
+    window.connect_delete_event(move |_window, _event| {
+        registry
+            .borrow_mut()
+            .retain(|entry| !Rc::ptr_eq(&entry.tab_paths, &tab_paths));
+        gtk::glib::Propagation::Proceed
+    });
+}
+
 /// Builds one tab's entire content: toolbar, outline sidebar, WebView, and
 /// the find-bar overlay, wired together and pointed at `tab`'s server
 /// instance. Returns the tab's root widget, ready to hand to
@@ -255,9 +358,7 @@ fn build_tab(
     tab: &TabSource,
     prefs: Rc<RefCell<Preferences>>,
     prefs_path: &Path,
-    window: &gtk::ApplicationWindow,
-    notebook: &gtk::Notebook,
-    tab_paths: Rc<Vec<PathBuf>>,
+    registry: &Registry,
 ) -> gtk::Box {
     let addr = tab.addr;
     let webview = webkit2gtk::WebView::new();
@@ -275,7 +376,7 @@ fn build_tab(
 
     connect_scroll_restore(&webview, Rc::clone(&pending_scroll_fraction));
     connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
-    connect_link_navigation(&webview, addr, window.clone(), notebook.clone(), tab_paths);
+    connect_link_navigation(&webview, addr, Rc::clone(registry));
 
     let headings = extract_headings(&tab.markdown);
     let outline_tree = outline::build_tree(&headings);
@@ -372,17 +473,12 @@ fn connect_zoom_restore(
 /// Intercepts every link-click navigation the WebView reports
 /// (`WebKitNavigationType::LinkClicked`) and, per `crate::linkaction::classify`,
 /// either lets WebKit apply its own default policy (in-page anchors, this
-/// tab's own `mudl-server` pages) or takes over: focuses this window's own
-/// tab (or spawns a new `mudl` window) for a local `.md`/`.markdown` link,
-/// hands an `http(s)://`/`mailto:` link to the OS's default browser/mail
-/// client, or hands any other local file to `xdg-open`.
-fn connect_link_navigation(
-    webview: &webkit2gtk::WebView,
-    addr: SocketAddr,
-    window: gtk::ApplicationWindow,
-    notebook: gtk::Notebook,
-    tab_paths: Rc<Vec<PathBuf>>,
-) {
+/// tab's own `mudl-server` pages) or takes over: focuses whichever window
+/// already has the target file open (or spawns a new `mudl` window) for a
+/// local `.md`/`.markdown` link, hands an `http(s)://`/`mailto:` link to
+/// the OS's default browser/mail client, or hands any other local file to
+/// `xdg-open`.
+fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr, registry: Registry) {
     let server_addr = addr.to_string();
     webview.connect_decide_policy(move |_webview, decision, decision_type| {
         if decision_type != PolicyDecisionType::NavigationAction {
@@ -407,7 +503,9 @@ fn connect_link_navigation(
             crate::linkaction::LinkAction::Default => false,
             crate::linkaction::LinkAction::OpenNewWindow(path) => {
                 decision.ignore();
-                focus_or_open_window(&path, &window, &notebook, &tab_paths);
+                if !focus_if_already_open(&path, &registry) {
+                    open_in_new_window(&path);
+                }
                 true
             }
             crate::linkaction::LinkAction::OpenExternally(uri) => {
@@ -427,37 +525,18 @@ fn connect_link_navigation(
     });
 }
 
-/// If `path` (a `.md`/`.markdown` link target) matches one of this
-/// window's own open tabs, switches to that tab and raises the window
-/// instead of spawning a redundant new process — covers a link back to the
-/// file already open (or to another file already open in a sibling tab of
-/// the same window). There's still no cross-process "focus the existing
-/// window" mechanism for a file open in a *different* `mudl` window/process
-/// (Phase 10.6's `NON_UNIQUE` `GApplication` flag rules out GApplication's
-/// own D-Bus activation for that, and there's no separate IPC registry), so
-/// that case still falls through to `open_in_new_window`.
-fn focus_or_open_window(
-    path: &Path,
-    window: &gtk::ApplicationWindow,
-    notebook: &gtk::Notebook,
-    tab_paths: &[PathBuf],
-) {
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if let Some(index) = tab_paths.iter().position(|tab_path| *tab_path == canonical) {
-        notebook.set_current_page(Some(index as u32));
-        window.present();
-        return;
-    }
-    open_in_new_window(path);
-}
-
-/// Opens `path` in a brand-new `mudl` window by re-exec'ing this same
-/// binary with the child-marker env var set directly — skipping
-/// `mudl-cli`'s own detach-and-re-exec step (this process is already
-/// detached), so the new process goes straight into `mudl_gui::launch`.
-/// The literal `"MUDL_GUI_CHILD"` must match
-/// `crates/mudl-cli/src/main.rs::GUI_CHILD_ENV` — there's no shared
-/// constant since `mudl-gui` doesn't depend on `mudl-cli`.
+/// Spawns `path` as a new `mudl` invocation (re-exec'ing this same binary
+/// with the child-marker env var set directly — skipping `mudl-cli`'s own
+/// detach-and-re-exec step, since this process is already detached) when
+/// `focus_if_already_open` couldn't find it already open anywhere. Thanks
+/// to `run`'s `HANDLES_OPEN` GApplication setup, that spawned process
+/// doesn't actually build a second GTK app: it detects this already-running
+/// primary instance and forwards the file to *this* process's own `open`
+/// handler over D-Bus instead, which re-checks the registry (a small,
+/// harmless race window aside) and builds the new window here. The literal
+/// `"MUDL_GUI_CHILD"` must match `crates/mudl-cli/src/main.rs::GUI_CHILD_ENV`
+/// — there's no shared constant since `mudl-gui` doesn't depend on
+/// `mudl-cli`.
 fn open_in_new_window(path: &Path) {
     let Ok(exe) = std::env::current_exe() else {
         return;
