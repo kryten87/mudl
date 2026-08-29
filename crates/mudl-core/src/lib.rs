@@ -1,4 +1,5 @@
 pub mod alerts;
+pub mod changes;
 pub mod emoji;
 pub mod encoding;
 pub mod folder;

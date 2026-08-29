@@ -8,7 +8,18 @@
 //! real document is Phase 13.8's concern, where it plugs into
 //! `mudl-core`'s renderer).
 
-use mudl_core::footnotes::is_comment_label;
+/// `comment-` followed only by `[\w-]+` — a local copy of
+/// `mudl_core::footnotes::is_comment_label` (not a dependency: `mudl-core`
+/// depends on `mudl-diff`, not the reverse, so this three-line predicate is
+/// duplicated rather than shared, to avoid a crate cycle).
+fn is_comment_label(label: &str) -> bool {
+    match label.strip_prefix("comment-") {
+        Some(suffix) if !suffix.is_empty() => suffix
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-'),
+        _ => false,
+    }
+}
 
 /// The block-kind-specific normalization `fingerprint` applies before
 /// comparing two blocks. Mirrors the Swift source's `isProse`/table-row/
@@ -45,6 +56,12 @@ pub struct LeafBlock {
     /// The fence info string for a `CodeBlock` (e.g. `"rust"`), or `None`
     /// for a bare fence/indented block or any other kind.
     pub language: Option<String>,
+    /// This block's `(start, end)` byte range in the document it was
+    /// collected from, when the collector tracks one — `mudl-core`'s
+    /// (Phase 13.8) uses this to know where in the rendered HTML to splice
+    /// in change-tracking markup; a block built by hand (as in this
+    /// module's own tests) leaves it `None`.
+    pub range: Option<(usize, usize)>,
 }
 
 /// Describes the relationship between a block in the old and new documents.
@@ -290,6 +307,7 @@ mod tests {
             source_line: line,
             source_text: text.to_string(),
             language: None,
+            range: None,
         }
     }
 
@@ -341,12 +359,14 @@ mod tests {
             source_line: 1,
             source_text: "| a   | b |".to_string(),
             language: None,
+            range: None,
         };
         let tight = LeafBlock {
             kind: BlockKind::TableRow,
             source_line: 1,
             source_text: "| a | b |".to_string(),
             language: None,
+            range: None,
         };
         assert_eq!(fingerprint(&padded), fingerprint(&tight));
     }
@@ -360,12 +380,14 @@ mod tests {
             source_line: 1,
             source_text: "5. Foo".to_string(),
             language: None,
+            range: None,
         };
         let four = LeafBlock {
             kind: BlockKind::OrderedListItem,
             source_line: 1,
             source_text: "4. Foo".to_string(),
             language: None,
+            range: None,
         };
         assert_eq!(fingerprint(&five), fingerprint(&four));
     }
@@ -377,12 +399,14 @@ mod tests {
             source_line: 1,
             source_text: "5. Foo".to_string(),
             language: None,
+            range: None,
         };
         let b = LeafBlock {
             kind: BlockKind::OrderedListItem,
             source_line: 1,
             source_text: "5. Bar".to_string(),
             language: None,
+            range: None,
         };
         assert_ne!(fingerprint(&a), fingerprint(&b));
     }
@@ -396,12 +420,14 @@ mod tests {
             source_line: 1,
             source_text: "fn main() {}".to_string(),
             language: None,
+            range: None,
         };
         let b = LeafBlock {
             kind: BlockKind::Verbatim,
             source_line: 1,
             source_text: "fn main() {  }".to_string(),
             language: None,
+            range: None,
         };
         assert_ne!(fingerprint(&a), fingerprint(&b));
     }

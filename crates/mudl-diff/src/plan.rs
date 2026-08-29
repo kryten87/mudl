@@ -435,6 +435,7 @@ mod tests {
             source_line: 1,
             source_text: text.to_string(),
             language: None,
+            range: None,
         }
     }
 
@@ -444,6 +445,7 @@ mod tests {
             source_line: 1,
             source_text: text.to_string(),
             language: language.map(str::to_string),
+            range: None,
         }
     }
 

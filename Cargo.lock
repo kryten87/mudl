@@ -445,15 +445,13 @@ version = "0.1.0"
 name = "mudl-core"
 version = "0.1.0"
 dependencies = [
+ "mudl-diff",
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "mudl-diff"
 version = "0.1.0"
-dependencies = [
- "mudl-core",
-]
 
 [[package]]
 name = "mudl-gui"
