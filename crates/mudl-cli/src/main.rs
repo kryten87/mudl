@@ -1,9 +1,11 @@
 mod args;
+mod installer;
 
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 use args::{parse, ArgError, Mode, ParsedArgs, RenderArgs};
+use installer::RealFileSystem as InstallerFileSystem;
 use mudl_core::images::rewrite_srcs_to_data_uris;
 use mudl_core::options::RenderOptions;
 use mudl_core::render::{render_down, render_up};
@@ -25,6 +27,7 @@ FLAGS:
         --word-wrap         Wrap long lines (Down mode)
         --readable-column   Constrain body width to a readable column
         --theme NAME        One of: austere, blues, earthy, riot, system
+        --install-cli       Symlink this binary into ~/.local/bin/mudl
 
 With no FILE arguments, reads Markdown from stdin. With no render flag
 (-u/-d), launches the GUI instead.\
@@ -59,6 +62,7 @@ fn run(
             let _ = writeln!(stdout, "mudl {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        Ok(ParsedArgs::InstallCli) => install_cli(stdout, stderr),
         Ok(ParsedArgs::LaunchGui(files)) => match mudl_gui::launch(&files) {
             Ok(()) => ExitCode::SUCCESS,
             Err(message) => {
@@ -67,6 +71,23 @@ fn run(
             }
         },
         Ok(ParsedArgs::Render(render_args)) => render(&render_args, stdin, stdout, stderr),
+    }
+}
+
+fn install_cli(stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode {
+    let Some(home) = std::env::var_os("HOME") else {
+        let _ = writeln!(stderr, "mudl: failed to install CLI: HOME is not set");
+        return ExitCode::from(2);
+    };
+    match installer::install(&InstallerFileSystem, std::path::Path::new(&home)) {
+        Ok(target) => {
+            let _ = writeln!(stdout, "Installed mudl CLI at {}", target.display());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            let _ = writeln!(stderr, "mudl: failed to install CLI: {err}");
+            ExitCode::from(2)
+        }
     }
 }
 

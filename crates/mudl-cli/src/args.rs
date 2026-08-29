@@ -31,6 +31,7 @@ pub struct RenderArgs {
 pub enum ParsedArgs {
     Help,
     Version,
+    InstallCli,
     Render(RenderArgs),
     LaunchGui(Vec<String>),
 }
@@ -62,6 +63,7 @@ pub fn parse(args: &[String]) -> Result<ParsedArgs, ArgError> {
         match arg.as_str() {
             "--help" | "-h" => return Ok(ParsedArgs::Help),
             "--version" | "-v" => return Ok(ParsedArgs::Version),
+            "--install-cli" => return Ok(ParsedArgs::InstallCli),
             "--html-up" | "-u" => {
                 if mode == Some(Mode::Down) {
                     return Err(ArgError(
@@ -151,6 +153,11 @@ mod tests {
     #[test]
     fn version_short() {
         assert_eq!(parse(&args(&["-v"])), Ok(ParsedArgs::Version));
+    }
+
+    #[test]
+    fn install_cli_flag() {
+        assert_eq!(parse(&args(&["--install-cli"])), Ok(ParsedArgs::InstallCli));
     }
 
     #[test]
