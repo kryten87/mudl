@@ -1,8 +1,16 @@
-//! The GTK3 + WebKit2GTK window (Phases 10.1-10.4 of
+//! The GTK3 + WebKit2GTK window (Phases 10.1-10.6 of
 //! `docs/IMPLEMENTATION-PLAN.md`): a `gtk::ApplicationWindow` containing a
-//! toolbar, an outline sidebar, and a `webkit2gtk::WebView`, pointed at a
-//! `mudl-server` instance started for the given file, with a Space-bar
-//! Up/Down mode toggle.
+//! `gtk::Notebook`, one tab per opened file, each tab holding its own
+//! toolbar, outline sidebar, and `webkit2gtk::WebView` pointed at its own
+//! `mudl-server` instance, with a Space-bar Up/Down mode toggle scoped to
+//! whichever tab currently has focus.
+//!
+//! Per-tab keyboard shortcuts (Space, Ctrl+F) are connected on each tab's
+//! own root container rather than the shared window: GTK3 delivers
+//! `key-press-event` to the focused widget and bubbles it up through that
+//! widget's own ancestor chain, so a handler on tab A's container never
+//! fires while focus is inside tab B's — no explicit "is this the active
+//! tab" bookkeeping needed.
 //!
 //! This is GTK signal wiring and WebKit navigation, not algorithmic logic —
 //! per the plan's own note on Phase 10, there's no pure decision to extract
@@ -14,7 +22,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
@@ -49,37 +57,39 @@ const CAPTURE_SCROLL_FRACTION_JS: &str = "\
   return max > 0 ? window.scrollY / max : 0;
 })();";
 
-/// Starts a `mudl-server` instance serving `path` and opens a window
-/// pointed at it. Blocks until the window is closed — `gtk::Application::run`
-/// drives the GTK main loop for the lifetime of the process.
-pub fn run(path: PathBuf) -> Result<(), String> {
-    let absolute =
-        std::fs::canonicalize(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+/// One file's server instance, started before the window exists so a
+/// failure to bind/canonicalize/read is reported before any GTK state is
+/// touched.
+struct TabSource {
+    title: String,
+    addr: SocketAddr,
+    markdown: String,
+    document: Arc<DocumentSource>,
+}
 
-    // Best-effort: the sidebar's initial outline just starts empty if the
-    // file can't be read here (the main WebView will independently 404 for
-    // the same reason once it navigates to the server).
-    let markdown = std::fs::read_to_string(&absolute).unwrap_or_default();
+/// Starts a `mudl-server` instance per file in `paths` and opens one
+/// window with one tab per file. Blocks until the window is closed —
+/// `gtk::Application::run` drives the GTK main loop for the lifetime of
+/// the process.
+pub fn run(paths: &[PathBuf]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("no file given (folder index launch mode isn't implemented yet)".to_string());
+    }
 
     let prefs_path = preferences_path();
     let prefs = Rc::new(RefCell::new(mudl_config::load(
         &mudl_config::RealFileSystem,
         &prefs_path,
     )));
-    let initial_config = crate::config::document_config(&prefs.borrow());
 
-    let (addr, document) = start_server_for(absolute, initial_config)?;
+    let mut tabs = Vec::with_capacity(paths.len());
+    for path in paths {
+        tabs.push(start_tab_source(path, &prefs.borrow())?);
+    }
 
     let application = gtk::Application::new(Some(APP_ID), gtk::gio::ApplicationFlags::empty());
     application.connect_activate(move |app| {
-        build_window(
-            app,
-            addr,
-            &markdown,
-            Rc::clone(&prefs),
-            &prefs_path,
-            Arc::clone(&document),
-        );
+        build_window(app, &tabs, Rc::clone(&prefs), &prefs_path);
     });
 
     // No CLI args of ours are meaningful to GTK/GApplication's own option
@@ -101,18 +111,56 @@ fn preferences_path() -> PathBuf {
     PathBuf::from(home).join(".config/mudl/preferences")
 }
 
+fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, String> {
+    let absolute =
+        std::fs::canonicalize(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    // Best-effort: the sidebar's initial outline just starts empty if the
+    // file can't be read here (the main WebView will independently 404 for
+    // the same reason once it navigates to the server).
+    let markdown = std::fs::read_to_string(&absolute).unwrap_or_default();
+    let title = absolute
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let initial_config = crate::config::document_config(prefs);
+    let (addr, document) = start_server_for(absolute, initial_config)?;
+
+    Ok(TabSource {
+        title,
+        addr,
+        markdown,
+        document,
+    })
+}
+
 fn build_window(
     app: &gtk::Application,
-    addr: SocketAddr,
-    markdown: &str,
+    tabs: &[TabSource],
     prefs: Rc<RefCell<Preferences>>,
-    prefs_path: &std::path::Path,
-    document: Arc<DocumentSource>,
+    prefs_path: &Path,
 ) {
     let window = gtk::ApplicationWindow::new(app);
     window.set_title("mudl");
     window.set_default_size(960, 720);
 
+    let notebook = gtk::Notebook::new();
+    for tab in tabs {
+        let tab_widget = build_tab(tab, Rc::clone(&prefs), prefs_path);
+        let label = gtk::Label::new(Some(&tab.title));
+        notebook.append_page(&tab_widget, Some(&label));
+    }
+
+    window.add(&notebook);
+    window.show_all();
+}
+
+/// Builds one tab's entire content: toolbar, outline sidebar, WebView, and
+/// the find-bar overlay, wired together and pointed at `tab`'s server
+/// instance. Returns the tab's root widget, ready to hand to
+/// `gtk::Notebook::append_page`.
+fn build_tab(tab: &TabSource, prefs: Rc<RefCell<Preferences>>, prefs_path: &Path) -> gtk::Box {
+    let addr = tab.addr;
     let webview = webkit2gtk::WebView::new();
     webview.load_uri(&format!("http://{addr}/"));
 
@@ -128,15 +176,8 @@ fn build_window(
 
     connect_scroll_restore(&webview, Rc::clone(&pending_scroll_fraction));
     connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
-    connect_mode_toggle(
-        &window,
-        &webview,
-        addr,
-        Rc::clone(&mode),
-        pending_scroll_fraction,
-    );
 
-    let headings = extract_headings(markdown);
+    let headings = extract_headings(&tab.markdown);
     let outline_tree = outline::build_tree(&headings);
     let sidebar_view = sidebar::build_outline_tree_view(&outline_tree);
     connect_sidebar_navigation(&sidebar_view, &webview, Rc::clone(&mode));
@@ -152,29 +193,32 @@ fn build_window(
 
     let toolbar_ctx = toolbar::Context {
         webview: webview.clone(),
-        mode,
+        mode: Rc::clone(&mode),
         prefs,
         prefs_path: prefs_path.to_path_buf(),
-        document,
+        document: Arc::clone(&tab.document),
         addr,
     };
     let toolbar_widget = toolbar::build(&toolbar_ctx);
 
     let (overlay, find_bar) = find::build(&paned, &webview);
-    connect_find_shortcut(&window, find_bar);
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     vbox.pack_start(&toolbar_widget, false, false, 0);
     vbox.pack_start(&overlay, true, true, 0);
 
-    window.add(&vbox);
-    window.show_all();
+    connect_find_shortcut(&vbox, find_bar);
+    connect_mode_toggle(&vbox, &webview, addr, mode, pending_scroll_fraction);
+
+    vbox
 }
 
 /// Ctrl+F shows and focuses the find bar; WebKit2GTK's own
-/// `WebKitFindController` handles everything else (Phase 10.5).
-fn connect_find_shortcut(window: &gtk::ApplicationWindow, find_bar: find::FindBar) {
-    window.connect_key_press_event(move |_window, event| {
+/// `WebKitFindController` handles everything else (Phase 10.5). Connected
+/// on the tab's own container (see the module doc comment on per-tab
+/// shortcut scoping), not the shared window.
+fn connect_find_shortcut(tab_container: &gtk::Box, find_bar: find::FindBar) {
+    tab_container.connect_key_press_event(move |_widget, event| {
         let ctrl_f = event.state().contains(gtk::gdk::ModifierType::CONTROL_MASK)
             && event.keyval() == gtk::gdk::keys::constants::f;
         if ctrl_f {
@@ -228,15 +272,17 @@ fn connect_zoom_restore(
 /// Space bar: captures the current scroll fraction, flips `mode`, and
 /// re-navigates the WebView to `/` with `?mode=down` when the new mode is
 /// Down (its absence already means Up — see `mudl_server::routes::dispatch`).
+/// Connected on the tab's own container (see the module doc comment on
+/// per-tab shortcut scoping), not the shared window.
 fn connect_mode_toggle(
-    window: &gtk::ApplicationWindow,
+    tab_container: &gtk::Box,
     webview: &webkit2gtk::WebView,
     addr: SocketAddr,
     mode: Rc<Cell<Mode>>,
     pending_scroll_fraction: Rc<Cell<f64>>,
 ) {
     let webview = webview.clone();
-    window.connect_key_press_event(move |_window, event| {
+    tab_container.connect_key_press_event(move |_widget, event| {
         if event.keyval() != gtk::gdk::keys::constants::space {
             return gtk::glib::Propagation::Proceed;
         }

@@ -10,17 +10,12 @@ mod window;
 
 use std::path::PathBuf;
 
-/// Opens the GUI on the first file in `files` (multiple files opening as
-/// tabs in one window is Phase 10.6; a folder-index/no-file launch mode is
-/// a later addition too — see Appendix B's `folderOpenBehavior`). Blocks
-/// until the window closes.
+/// Opens one window with one tab per file in `files` (Phase 10.6). A
+/// folder-index/no-file launch mode is a later addition — see Appendix
+/// B's `folderOpenBehavior`. Blocks until the window closes.
 pub fn launch(files: &[String]) -> Result<(), String> {
-    let Some(first) = files.first() else {
-        return Err(
-            "no file given (folder index / multi-file launch isn't implemented yet)".to_string(),
-        );
-    };
-    window::run(PathBuf::from(first))
+    let paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+    window::run(&paths)
 }
 
 #[cfg(test)]
