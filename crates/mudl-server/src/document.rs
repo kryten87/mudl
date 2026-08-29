@@ -98,7 +98,12 @@ pub fn render(
         title: title.to_string(),
         base_href: None,
         styles,
-        csp_img_src: vec!["'self'".to_string()],
+        csp_img_src: vec![
+            "'self'".to_string(),
+            "https:".to_string(),
+            "http:".to_string(),
+            "data:".to_string(),
+        ],
         csp_script_src: vec!["'self'".to_string(), "'unsafe-inline'".to_string()],
         html_classes: html_classes(config),
         zoom_level: match mode {
