@@ -8,6 +8,7 @@ pub mod frontmatter_html;
 pub mod headings;
 pub mod images;
 pub mod options;
+pub mod outline;
 pub mod parse;
 pub mod render;
 pub mod resources;
