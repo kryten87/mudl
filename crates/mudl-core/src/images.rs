@@ -51,6 +51,23 @@ pub fn encode_data_uri(
     ))
 }
 
+/// Rewrites every local `<img src="...">` in `html` to an inlined data URI
+/// (used for `--standalone` export, Phase 8.2), reusing the same tag scanner
+/// as [`crate::template::rewrite_local_image_srcs`]. A source that can't be
+/// inlined (external, unknown extension, or an unreadable file) is left as
+/// the original `src` value rather than dropped, so a broken/missing local
+/// image degrades to the same "broken image" rendering a browser would show
+/// for the un-rewritten path, instead of vanishing silently.
+pub fn rewrite_srcs_to_data_uris(
+    html: &str,
+    base_dir: &Path,
+    read: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+) -> String {
+    crate::template::rewrite_img_srcs(html, &|src| {
+        encode_data_uri(src, base_dir, read).unwrap_or_else(|| src.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +255,53 @@ mod tests {
         let read = |_: &Path| -> io::Result<Vec<u8>> { Ok(Vec::new()) };
         let result = encode_data_uri("photo.png", base, &read).unwrap();
         assert_eq!(result, "data:image/png;base64,");
+    }
+
+    #[test]
+    fn rewrite_srcs_to_data_uris_local_image_inlined() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> { Ok(b"fo".to_vec()) };
+        let html = r#"<p><img src="photo.png" alt="x"></p>"#;
+        assert_eq!(
+            rewrite_srcs_to_data_uris(html, base, &read),
+            r#"<p><img src="data:image/png;base64,Zm8=" alt="x"></p>"#
+        );
+    }
+
+    #[test]
+    fn rewrite_srcs_to_data_uris_external_source_unchanged() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> { panic!("read should not be called") };
+        let html = r#"<img src="https://example.com/photo.png">"#;
+        assert_eq!(rewrite_srcs_to_data_uris(html, base, &read), html);
+    }
+
+    #[test]
+    fn rewrite_srcs_to_data_uris_missing_file_falls_back_to_original_src() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "missing"))
+        };
+        let html = r#"<img src="photo.png">"#;
+        assert_eq!(rewrite_srcs_to_data_uris(html, base, &read), html);
+    }
+
+    #[test]
+    fn rewrite_srcs_to_data_uris_no_img_tags_unchanged() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> { panic!("read should not be called") };
+        let html = "<p>no images here</p>";
+        assert_eq!(rewrite_srcs_to_data_uris(html, base, &read), html);
+    }
+
+    #[test]
+    fn rewrite_srcs_to_data_uris_multiple_images() {
+        let base = Path::new("/base/dir");
+        let read = |_: &Path| -> io::Result<Vec<u8>> { Ok(b"fo".to_vec()) };
+        let html = r#"<img src="a.png"><img src="b.png">"#;
+        assert_eq!(
+            rewrite_srcs_to_data_uris(html, base, &read),
+            r#"<img src="data:image/png;base64,Zm8="><img src="data:image/png;base64,Zm8=">"#
+        );
     }
 }

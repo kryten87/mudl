@@ -242,6 +242,15 @@ pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection
 /// absolute `src` simply replaces `base_dir` per `Path::join`'s standard
 /// behavior), then percent-encoded and rewritten to `/local/<encoded>`.
 pub fn rewrite_local_image_srcs(html: &str, base_dir: &Path) -> String {
+    rewrite_img_srcs(html, &|src| rewrite_src(src, base_dir))
+}
+
+/// The shared `<img src="...">` text scanner behind [`rewrite_local_image_srcs`]
+/// and (Phase 8.2) `mudl_core::images::rewrite_srcs_to_data_uris` — the two
+/// differ only in how a single already-isolated `src` value is rewritten, so
+/// that policy is factored out to `rewrite_one` rather than duplicating the
+/// tag-scanning loop.
+pub(crate) fn rewrite_img_srcs(html: &str, rewrite_one: &dyn Fn(&str) -> String) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
 
@@ -252,7 +261,7 @@ pub fn rewrite_local_image_srcs(html: &str, base_dir: &Path) -> String {
         match from_tag.find('>') {
             Some(close_rel) => {
                 let tag_end = close_rel + 1;
-                out.push_str(&rewrite_img_tag(&from_tag[..tag_end], base_dir));
+                out.push_str(&rewrite_img_tag(&from_tag[..tag_end], rewrite_one));
                 rest = &from_tag[tag_end..];
             }
             None => {
@@ -271,7 +280,7 @@ pub fn rewrite_local_image_srcs(html: &str, base_dir: &Path) -> String {
 /// Rewrites the `src="..."` attribute value (if any) within a single
 /// already-isolated `<img ...>` tag; everything else in `tag` is copied
 /// verbatim.
-fn rewrite_img_tag(tag: &str, base_dir: &Path) -> String {
+fn rewrite_img_tag(tag: &str, rewrite_one: &dyn Fn(&str) -> String) -> String {
     const NEEDLE: &str = "src=\"";
 
     let Some(attr_start) = tag.find(NEEDLE) else {
@@ -283,7 +292,7 @@ fn rewrite_img_tag(tag: &str, base_dir: &Path) -> String {
     };
 
     let src = &tag[value_start..value_start + value_len];
-    let rewritten = rewrite_src(src, base_dir);
+    let rewritten = rewrite_one(src);
 
     format!(
         "{}{}{}",
