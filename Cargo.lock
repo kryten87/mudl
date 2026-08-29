@@ -456,6 +456,7 @@ dependencies = [
  "mudl-config",
  "mudl-core",
  "mudl-server",
+ "mudl-watch",
  "webkit2gtk",
 ]
 

@@ -1,9 +1,10 @@
-//! The GTK3 + WebKit2GTK window (Phases 10.1-10.6 of
+//! The GTK3 + WebKit2GTK window (Phases 10.1-10.8 of
 //! `docs/IMPLEMENTATION-PLAN.md`): a `gtk::ApplicationWindow` containing a
 //! `gtk::Notebook`, one tab per opened file, each tab holding its own
 //! toolbar, outline sidebar, and `webkit2gtk::WebView` pointed at its own
-//! `mudl-server` instance, with a Space-bar Up/Down mode toggle scoped to
-//! whichever tab currently has focus.
+//! `mudl-server` instance (with its own file watcher live-reloading it —
+//! Phase 10.8), with a Space-bar Up/Down mode toggle scoped to whichever
+//! tab currently has focus.
 //!
 //! Per-tab keyboard shortcuts (Space, Ctrl+F) are connected on each tab's
 //! own root container rather than the shared window: GTK3 delivers
@@ -48,6 +49,11 @@ use crate::toolbar;
 
 const APP_ID: &str = "com.monstergfx.mudl";
 
+/// How often each open document's file is checked for changes (Phase
+/// 10.8). Matches the plan's suggested default (§6.1: "300ms — tunable,
+/// not hardcoded"); there's no preference wired up to tune it yet.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Reports the current scroll position as a fraction of the scrollable
 /// height: `0.0` at the top, `1.0` at the bottom, `0.0` when the page
 /// doesn't scroll at all (avoids a divide-by-zero rather than reporting
@@ -69,6 +75,10 @@ struct TabSource {
     addr: SocketAddr,
     markdown: String,
     document: Arc<DocumentSource>,
+    /// Kept alive only to keep the file watcher running (Phase 10.8) —
+    /// dropped, and the watch stopped, when the window closes and `tabs`
+    /// goes out of scope.
+    _watch: mudl_watch::WatchHandle,
 }
 
 /// Starts a `mudl-server` instance per file in `paths` and opens one
@@ -135,7 +145,7 @@ fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, Strin
         .unwrap_or_default();
 
     let initial_config = crate::config::document_config(prefs);
-    let (addr, document) = start_server_for(absolute.clone(), initial_config)?;
+    let (addr, document, watch) = start_server_for(absolute.clone(), initial_config)?;
 
     Ok(TabSource {
         path: absolute,
@@ -143,6 +153,7 @@ fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, Strin
         addr,
         markdown,
         document,
+        _watch: watch,
     })
 }
 
@@ -393,14 +404,18 @@ fn connect_sidebar_navigation(
 }
 
 /// Binds a `mudl-server` instance for `path`, seeds it with `config`, and
-/// runs its accept loop on a background thread. Returns the address it's
-/// listening on (so the WebView can navigate to it) and the shared
-/// `DocumentSource` handle (so the toolbar can update its config live —
-/// Phase 10.4).
+/// runs its accept loop on a background thread, and starts watching `path`
+/// for changes on another (Phase 10.8), bumping the same `VersionCounter`
+/// the live-reload script served with every page (§2, wired in Phase
+/// 10.1's `document::render`) long-polls against. Returns the address the
+/// WebView should navigate to, the shared `DocumentSource` handle (so the
+/// toolbar can update its config live — Phase 10.4), and the watcher's
+/// handle — dropping/stopping it stops the watch, so the caller must keep
+/// it alive for as long as the window should live-reload.
 fn start_server_for(
     path: PathBuf,
     config: DocumentConfig,
-) -> Result<(SocketAddr, Arc<DocumentSource>), String> {
+) -> Result<(SocketAddr, Arc<DocumentSource>, mudl_watch::WatchHandle), String> {
     let listener = server::bind().map_err(|err| format!("failed to start local server: {err}"))?;
     let addr = listener
         .local_addr()
@@ -408,11 +423,27 @@ fn start_server_for(
 
     let version = VersionCounter::new();
     let filesystem = Arc::new(RealFileSystem);
-    let document = Arc::new(DocumentSource::new(path));
+    let document = Arc::new(DocumentSource::new(path.clone()));
     document.set_config(config);
 
     let document_for_thread = Arc::clone(&document);
-    thread::spawn(move || server::serve(listener, version, filesystem, document_for_thread));
+    let version_for_server = version.clone();
+    thread::spawn(move || {
+        server::serve(
+            listener,
+            version_for_server,
+            filesystem,
+            document_for_thread,
+        )
+    });
 
-    Ok((addr, document))
+    let watch_source = mudl_watch::PollingChangeSource::new(
+        path,
+        mudl_watch::RealFileSystem,
+        mudl_watch::RealClock,
+        WATCH_INTERVAL,
+    );
+    let watch_handle = watch_source.spawn(move |_event| version.bump());
+
+    Ok((addr, document, watch_handle))
 }
