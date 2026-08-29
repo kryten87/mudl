@@ -13,7 +13,7 @@ use mudl_core::footnotes::is_comment_label;
 /// The block-kind-specific normalization `fingerprint` applies before
 /// comparing two blocks. Mirrors the Swift source's `isProse`/table-row/
 /// ordered-list special cases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockKind {
     /// Paragraphs, headings, plain list items: cosmetic whitespace
     /// (re-wrapping, continuation-line quote prefixes) is not a change.
@@ -23,23 +23,32 @@ pub enum BlockKind {
     OrderedListItem,
     /// A table row: pipe-padding whitespace is not a change.
     TableRow,
-    /// Code blocks, HTML blocks, thematic breaks: whitespace is real
-    /// content, compared verbatim.
+    /// A fenced/indented code block: whitespace is real content, compared
+    /// verbatim. Carries its own variant (rather than folding into
+    /// `Verbatim`) so `plan::build` (13.6) can find code blocks to pair by
+    /// position and read `LeafBlock::language` for the Mermaid/math
+    /// pairing exclusion.
+    CodeBlock,
+    /// HTML blocks, thematic breaks: whitespace is real content, compared
+    /// verbatim.
     Verbatim,
 }
 
 /// A leaf-level block, already collected from a document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LeafBlock {
     pub kind: BlockKind,
     /// 1-based line number of the block's start in the source.
     pub source_line: usize,
     /// The block's raw source text.
     pub source_text: String,
+    /// The fence info string for a `CodeBlock` (e.g. `"rust"`), or `None`
+    /// for a bare fence/indented block or any other kind.
+    pub language: Option<String>,
 }
 
 /// Describes the relationship between a block in the old and new documents.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BlockMatch {
     Unchanged { old: LeafBlock, new: LeafBlock },
     Inserted { new: LeafBlock },
@@ -56,7 +65,7 @@ pub fn fingerprint(block: &LeafBlock) -> String {
         BlockKind::Prose => normalized_prose(&stripped),
         BlockKind::OrderedListItem => normalized_prose(strip_ordered_marker(&stripped)),
         BlockKind::TableRow => collapse_whitespace_runs(&stripped),
-        BlockKind::Verbatim => stripped,
+        BlockKind::CodeBlock | BlockKind::Verbatim => stripped,
     }
 }
 
@@ -280,6 +289,7 @@ mod tests {
             kind: BlockKind::Prose,
             source_line: line,
             source_text: text.to_string(),
+            language: None,
         }
     }
 
@@ -330,11 +340,13 @@ mod tests {
             kind: BlockKind::TableRow,
             source_line: 1,
             source_text: "| a   | b |".to_string(),
+            language: None,
         };
         let tight = LeafBlock {
             kind: BlockKind::TableRow,
             source_line: 1,
             source_text: "| a | b |".to_string(),
+            language: None,
         };
         assert_eq!(fingerprint(&padded), fingerprint(&tight));
     }
@@ -347,11 +359,13 @@ mod tests {
             kind: BlockKind::OrderedListItem,
             source_line: 1,
             source_text: "5. Foo".to_string(),
+            language: None,
         };
         let four = LeafBlock {
             kind: BlockKind::OrderedListItem,
             source_line: 1,
             source_text: "4. Foo".to_string(),
+            language: None,
         };
         assert_eq!(fingerprint(&five), fingerprint(&four));
     }
@@ -362,11 +376,13 @@ mod tests {
             kind: BlockKind::OrderedListItem,
             source_line: 1,
             source_text: "5. Foo".to_string(),
+            language: None,
         };
         let b = LeafBlock {
             kind: BlockKind::OrderedListItem,
             source_line: 1,
             source_text: "5. Bar".to_string(),
+            language: None,
         };
         assert_ne!(fingerprint(&a), fingerprint(&b));
     }
@@ -379,11 +395,13 @@ mod tests {
             kind: BlockKind::Verbatim,
             source_line: 1,
             source_text: "fn main() {}".to_string(),
+            language: None,
         };
         let b = LeafBlock {
             kind: BlockKind::Verbatim,
             source_line: 1,
             source_text: "fn main() {  }".to_string(),
+            language: None,
         };
         assert_ne!(fingerprint(&a), fingerprint(&b));
     }

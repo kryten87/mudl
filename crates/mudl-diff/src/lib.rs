@@ -11,6 +11,7 @@ pub mod block;
 mod lcs;
 pub mod line;
 pub mod pairing;
+pub mod plan;
 pub mod word;
 
 #[cfg(test)]
