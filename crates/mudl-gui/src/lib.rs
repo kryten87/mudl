@@ -3,6 +3,7 @@
 
 mod config;
 mod find;
+mod geometry;
 mod sidebar;
 mod toggle;
 mod toolbar;

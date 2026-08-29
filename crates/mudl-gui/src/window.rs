@@ -41,6 +41,7 @@ use mudl_server::server::{self, DocumentSource};
 use mudl_server::version::VersionCounter;
 
 use crate::find;
+use crate::geometry;
 use crate::sidebar;
 use crate::toggle::next_mode;
 use crate::toolbar;
@@ -61,6 +62,9 @@ const CAPTURE_SCROLL_FRACTION_JS: &str = "\
 /// failure to bind/canonicalize/read is reported before any GTK state is
 /// touched.
 struct TabSource {
+    /// The canonicalized path — identity for outline extraction and (for
+    /// the first tab specifically) the window geometry key (Phase 10.7).
+    path: PathBuf,
     title: String,
     addr: SocketAddr,
     markdown: String,
@@ -111,6 +115,13 @@ fn preferences_path() -> PathBuf {
     PathBuf::from(home).join(".config/mudl/preferences")
 }
 
+/// `~/.config/mudl/window-geometry` — see `crate::geometry`'s doc comment
+/// for why this is a separate file from `preferences_path()`'s.
+fn geometry_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".config/mudl/window-geometry")
+}
+
 fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, String> {
     let absolute =
         std::fs::canonicalize(path).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -124,9 +135,10 @@ fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, Strin
         .unwrap_or_default();
 
     let initial_config = crate::config::document_config(prefs);
-    let (addr, document) = start_server_for(absolute, initial_config)?;
+    let (addr, document) = start_server_for(absolute.clone(), initial_config)?;
 
     Ok(TabSource {
+        path: absolute,
         title,
         addr,
         markdown,
@@ -142,7 +154,22 @@ fn build_window(
 ) {
     let window = gtk::ApplicationWindow::new(app);
     window.set_title("mudl");
-    window.set_default_size(960, 720);
+
+    // The window's geometry is keyed by its first tab's path (Phase
+    // 10.7) — `tabs` is never empty (`run` errors first if `paths` was).
+    let geometry_key = tabs[0].path.clone();
+    let geometry_path = geometry_path();
+    match geometry::load(&mudl_config::RealFileSystem, &geometry_path, &geometry_key) {
+        Some(saved) => {
+            window.resize(saved.width, saved.height);
+            window.move_(saved.x, saved.y);
+        }
+        None => {
+            window.set_default_size(960, 720);
+            window.set_position(gtk::WindowPosition::Center);
+        }
+    }
+    connect_geometry_save(&window, geometry_path, geometry_key);
 
     let notebook = gtk::Notebook::new();
     for tab in tabs {
@@ -153,6 +180,33 @@ fn build_window(
 
     window.add(&notebook);
     window.show_all();
+}
+
+/// On close, saves the window's current size/position keyed by
+/// `geometry_key` (Phase 10.7). Save errors are swallowed — there's
+/// nothing useful to do with them at the point the window is closing.
+fn connect_geometry_save(
+    window: &gtk::ApplicationWindow,
+    geometry_path: PathBuf,
+    geometry_key: PathBuf,
+) {
+    window.connect_delete_event(move |window, _event| {
+        let (width, height) = window.size();
+        let (x, y) = window.position();
+        let saved = geometry::Geometry {
+            width,
+            height,
+            x,
+            y,
+        };
+        let _ = geometry::save(
+            &mudl_config::RealFileSystem,
+            &geometry_path,
+            &geometry_key,
+            saved,
+        );
+        gtk::glib::Propagation::Proceed
+    });
 }
 
 /// Builds one tab's entire content: toolbar, outline sidebar, WebView, and
