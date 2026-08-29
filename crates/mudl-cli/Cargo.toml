@@ -2,7 +2,39 @@
 name = "mudl-cli"
 version = "0.1.0"
 edition.workspace = true
+description = "A Perfect Markdown Viewer"
+license = "SEE LICENSE IN LICENSE.md"
+
+# The crate is `mudl-cli` (matching the workspace's per-crate naming
+# convention), but the shipped binary is plain `mudl` — that's the name
+# users type, the desktop entry's Exec=, and the CLI installer's symlink
+# target (see Phase 11.1/11.2).
+[[bin]]
+name = "mudl"
+path = "src/main.rs"
 
 [dependencies]
 mudl-core = { path = "../mudl-core" }
 mudl-gui = { path = "../mudl-gui" }
+
+# `cargo deb -p mudl-cli` from the workspace root (see docs/PACKAGING.md for
+# the reasoning behind picking .deb over an AppImage). `depends = "$auto"`
+# has cargo-deb inspect the built binary with `ldd` and fill in the actual
+# runtime shared-library packages (libgtk-3-0, libwebkit2gtk-4.1-0, etc.)
+# rather than us hand-maintaining a version-specific list here.
+[package.metadata.deb]
+name = "mudl"
+maintainer = "Dave Thomas <dave@monstergfx.com>"
+copyright = "2026, Joseph Pearson <@joseph>"
+license-file = ["../../LICENSE.md", "4"]
+extended-description = """\
+mudl is a Linux port of mud, "A Perfect Markdown Viewer": GitHub-flavored \
+Markdown rendering, a raw-source view, auto-reload on save, folder/outline \
+sidebars, themes, dark mode, and a CLI rendering tool."""
+section = "text"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/mudl", "usr/bin/mudl", "755"],
+    ["../../resources/mudl.desktop", "usr/share/applications/mudl.desktop", "644"],
+]
