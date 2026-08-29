@@ -2,7 +2,8 @@ mod args;
 mod installer;
 
 use std::io::{self, Read, Write};
-use std::process::ExitCode;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, ExitCode, Stdio};
 
 use args::{parse, ArgError, Mode, ParsedArgs, RenderArgs};
 use installer::RealFileSystem as InstallerFileSystem;
@@ -32,6 +33,10 @@ FLAGS:
 With no FILE arguments, reads Markdown from stdin. With no render flag
 (-u/-d), launches the GUI instead.\
 ";
+
+/// Set on the re-exec'd child so it knows to actually launch the GUI instead
+/// of detaching again (see `launch_gui`).
+const GUI_CHILD_ENV: &str = "MUDL_GUI_CHILD";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,15 +68,65 @@ fn run(
             ExitCode::SUCCESS
         }
         Ok(ParsedArgs::InstallCli) => install_cli(stdout, stderr),
-        Ok(ParsedArgs::LaunchGui(files)) => match mudl_gui::launch(&files) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(message) => {
-                let _ = writeln!(stderr, "mudl: {message}");
-                ExitCode::from(2)
-            }
-        },
+        Ok(ParsedArgs::LaunchGui(files)) => launch_gui(&files, stderr),
         Ok(ParsedArgs::Render(render_args)) => render(&render_args, stdin, stdout, stderr),
     }
+}
+
+/// Launches the GUI. The first time through, this process re-execs itself
+/// detached from the controlling terminal (its own session, stdio dropped)
+/// and exits immediately so the shell doesn't block on the GUI's lifetime —
+/// mirroring how e.g. VS Code's `code` CLI hands off to its GUI process. The
+/// re-exec'd child carries `GUI_CHILD_ENV` so it knows to actually launch the
+/// GUI instead of detaching again.
+fn launch_gui(files: &[String], stderr: &mut dyn Write) -> ExitCode {
+    // Checked here (rather than left to the detached child) so this
+    // error is still reported synchronously to the invoking shell.
+    if files.is_empty() {
+        let _ = writeln!(
+            stderr,
+            "mudl: no file given (folder index launch mode isn't implemented yet)"
+        );
+        return ExitCode::from(2);
+    }
+
+    if std::env::var_os(GUI_CHILD_ENV).is_none() {
+        return match spawn_detached_gui(files) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                let _ = writeln!(stderr, "mudl: failed to detach GUI: {err}");
+                ExitCode::from(2)
+            }
+        };
+    }
+
+    match mudl_gui::launch(files) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            let _ = writeln!(stderr, "mudl: {message}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn spawn_detached_gui(files: &[String]) -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    unsafe {
+        Command::new(exe)
+            .args(files)
+            .env(GUI_CHILD_ENV, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .pre_exec(|| {
+                // Detach from the invoking shell's session so the GUI
+                // survives the terminal closing (e.g. no SIGHUP on exit).
+                libc::setsid();
+                Ok(())
+            })
+            .spawn()?;
+    }
+    Ok(())
 }
 
 fn install_cli(stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode {

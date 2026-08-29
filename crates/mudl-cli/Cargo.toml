@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 mudl-core = { path = "../mudl-core" }
 mudl-gui = { path = "../mudl-gui" }
+libc = "0.2"
 
 # `cargo deb -p mudl-cli` from the workspace root (see docs/PACKAGING.md for
 # the reasoning behind picking .deb over an AppImage). `depends = "$auto"`
