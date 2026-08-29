@@ -169,10 +169,10 @@ mod tests {
     }
 
     #[test]
-    fn no_flags_launches_gui_stub_and_exits_two() {
+    fn no_flags_and_no_files_exits_two() {
         let (code, _, stderr) = run_with(&args(&[]), "");
         assert_eq!(code, ExitCode::from(2));
-        assert!(stderr.contains("GUI not yet implemented"));
+        assert!(stderr.contains("no file given"));
     }
 
     #[test]

@@ -10,7 +10,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use mudl_server::fs::{FileSystem, InMemoryFileSystem};
+use mudl_server::server::DocumentSource;
 use mudl_server::version::VersionCounter;
+use std::path::PathBuf;
+
+/// The document path every test server in this file is configured with.
+/// Most tests don't care about `Route::Document` at all; the ones that do
+/// insert content at this path into their filesystem fake.
+const DOCUMENT_PATH: &str = "/docs/notes.md";
 
 /// Binds the server to `127.0.0.1:0`, spawns its accept loop on a
 /// background thread, and returns the address it ended up listening on
@@ -21,13 +28,16 @@ fn start_server() -> (SocketAddr, VersionCounter) {
 }
 
 /// Same as `start_server`, but with a caller-supplied filesystem, for tests
-/// that exercise `/local/<path>` against known fake contents.
+/// that exercise `/local/<path>` (or `/`) against known fake contents.
 fn start_server_with_fs(filesystem: Arc<dyn FileSystem>) -> (SocketAddr, VersionCounter) {
     let listener = mudl_server::server::bind().expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read local addr");
     let version = VersionCounter::new();
     let server_version = version.clone();
-    thread::spawn(move || mudl_server::server::serve(listener, server_version, filesystem));
+    let document = Arc::new(DocumentSource::new(PathBuf::from(DOCUMENT_PATH)));
+    thread::spawn(move || {
+        mudl_server::server::serve(listener, server_version, filesystem, document)
+    });
     (addr, version)
 }
 
@@ -111,12 +121,28 @@ fn unknown_asset_name_is_404() {
 }
 
 #[test]
-fn document_route_is_a_placeholder_response_not_a_hang() {
+fn document_route_missing_file_is_404() {
     let (addr, _version) = start_server();
     let response = get(addr, "/");
     let (head, _body) = split_head_and_body(&response);
 
-    assert!(head.starts_with("HTTP/1.1 501"));
+    assert!(head.starts_with("HTTP/1.1 404 Not Found"));
+}
+
+#[test]
+fn document_route_renders_the_configured_file() {
+    let filesystem = InMemoryFileSystem::new();
+    filesystem.insert(DOCUMENT_PATH, b"# Hello".to_vec());
+    let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
+
+    let response = get(addr, "/");
+    let (head, body) = split_head_and_body(&response);
+
+    assert!(head.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(header_value(&head, "Content-Type"), Some("text/html"));
+    let text = String::from_utf8_lossy(body);
+    assert!(text.contains("<h1"));
+    assert!(text.contains("up-mode-output"));
 }
 
 #[test]

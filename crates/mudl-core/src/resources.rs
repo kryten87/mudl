@@ -48,6 +48,27 @@ pub const MERMAID_JS: &str = include_str!("../../../resources/js/mermaid.min.js"
 /// rendering.
 pub const TEMML_JS: &str = include_str!("../../../resources/js/temml.min.js");
 
+/// Shared client-side helpers (find, scroll, zoom) loaded on every served
+/// page, adapted from `mud`'s own `mud.js` (Phase 3.6).
+pub const MUD_JS: &str = include_str!("../../../resources/js/mud.js");
+/// Up-mode-only client helpers (foldable headings); no-ops when
+/// `.up-mode-output` isn't present in the page.
+pub const MUD_UP_JS: &str = include_str!("../../../resources/js/mud-up.js");
+/// Down-mode-only client helpers (per-line syntax highlighting); no-ops
+/// when `.down-mode-output` isn't present in the page.
+pub const MUD_DOWN_JS: &str = include_str!("../../../resources/js/mud-down.js");
+/// Runs `highlight.min.js` over Up mode's fenced code blocks (excluding
+/// Mermaid/math blocks, handled by their own init scripts).
+pub const HIGHLIGHT_INIT_JS: &str = include_str!("../../../resources/js/highlight-init.js");
+/// Runs `temml.min.js` over Up mode's ` ```math ` blocks.
+pub const MATH_INIT_JS: &str = include_str!("../../../resources/js/math-init.js");
+/// Runs `mermaid.min.js` over Up mode's ` ```mermaid ` blocks.
+pub const MERMAID_INIT_JS: &str = include_str!("../../../resources/js/mermaid-init.js");
+/// The live-reload long-poll client (implementation plan §2); expects a
+/// preceding inline `var MUDL_VERSION = N;` script to set its starting
+/// version.
+pub const LIVE_RELOAD_JS: &str = include_str!("../../../resources/js/live-reload.js");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +94,13 @@ mod tests {
         assert!(!HIGHLIGHT_JS.is_empty());
         assert!(!MERMAID_JS.is_empty());
         assert!(!TEMML_JS.is_empty());
+        assert!(!MUD_JS.is_empty());
+        assert!(!MUD_UP_JS.is_empty());
+        assert!(!MUD_DOWN_JS.is_empty());
+        assert!(!HIGHLIGHT_INIT_JS.is_empty());
+        assert!(!MATH_INIT_JS.is_empty());
+        assert!(!MERMAID_INIT_JS.is_empty());
+        assert!(!LIVE_RELOAD_JS.is_empty());
     }
 
     #[test]

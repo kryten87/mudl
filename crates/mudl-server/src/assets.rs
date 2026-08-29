@@ -7,9 +7,7 @@
 //! `mudl_core::template::select_assets` (Phase 3.3) already returns in its
 //! `AssetSelection` — this table is the other half, turning that name back
 //! into actual bytes to serve. Only assets that already have a
-//! `mudl_core::resources` constant are wired up; anything else (e.g. the
-//! client-side `mud.js`/`mud-up.js`/`mud-down.js` scripts, which aren't
-//! embedded as constants yet) is out of scope for this step and simply
+//! `mudl_core::resources` constant are wired up; anything else simply
 //! isn't in the table, so a request for one falls through to `None` (404).
 
 use mudl_core::resources;
@@ -34,6 +32,13 @@ pub fn lookup(name: &str) -> Option<&'static str> {
         "highlight.min.js" => Some(resources::HIGHLIGHT_JS),
         "mermaid.min.js" => Some(resources::MERMAID_JS),
         "temml.min.js" => Some(resources::TEMML_JS),
+        "mud.js" => Some(resources::MUD_JS),
+        "mud-up.js" => Some(resources::MUD_UP_JS),
+        "mud-down.js" => Some(resources::MUD_DOWN_JS),
+        "highlight-init.js" => Some(resources::HIGHLIGHT_INIT_JS),
+        "math-init.js" => Some(resources::MATH_INIT_JS),
+        "mermaid-init.js" => Some(resources::MERMAID_INIT_JS),
+        "live-reload.js" => Some(resources::LIVE_RELOAD_JS),
         _ => None,
     }
 }
@@ -64,12 +69,22 @@ mod lookup_tests {
         assert_eq!(lookup("highlight.min.js"), Some(resources::HIGHLIGHT_JS));
         assert_eq!(lookup("mermaid.min.js"), Some(resources::MERMAID_JS));
         assert_eq!(lookup("temml.min.js"), Some(resources::TEMML_JS));
+        assert_eq!(lookup("mud.js"), Some(resources::MUD_JS));
+        assert_eq!(lookup("mud-up.js"), Some(resources::MUD_UP_JS));
+        assert_eq!(lookup("mud-down.js"), Some(resources::MUD_DOWN_JS));
+        assert_eq!(
+            lookup("highlight-init.js"),
+            Some(resources::HIGHLIGHT_INIT_JS)
+        );
+        assert_eq!(lookup("math-init.js"), Some(resources::MATH_INIT_JS));
+        assert_eq!(lookup("mermaid-init.js"), Some(resources::MERMAID_INIT_JS));
+        assert_eq!(lookup("live-reload.js"), Some(resources::LIVE_RELOAD_JS));
     }
 
     #[test]
     fn unknown_name_is_none() {
-        assert_eq!(lookup("mud.js"), None);
         assert_eq!(lookup("does-not-exist.css"), None);
+        assert_eq!(lookup("does-not-exist.js"), None);
         assert_eq!(lookup(""), None);
     }
 }

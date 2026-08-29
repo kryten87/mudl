@@ -9,16 +9,35 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use crate::assets;
+use crate::document::{self, DocumentConfig};
 use crate::fs::FileSystem;
 use crate::http::{self, Request};
 use crate::routes::{self, Route};
 use crate::version::VersionCounter;
+
+/// Which file `Route::Document` renders, and how — the per-server-instance
+/// identity a `mudl-gui` window/tab (Phase 10.6: one server per document)
+/// supplies when it starts serving.
+#[derive(Debug, Clone)]
+pub struct DocumentSource {
+    pub path: PathBuf,
+    pub config: DocumentConfig,
+}
+
+impl DocumentSource {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            config: DocumentConfig::default(),
+        }
+    }
+}
 
 /// How long a `/wait` long-poll request blocks before returning the
 /// unchanged version. Short enough to keep tests fast, long enough to be a
@@ -36,17 +55,26 @@ pub fn bind() -> io::Result<TcpListener> {
 /// practice means the listener itself was dropped/closed.
 ///
 /// `version` is shared (cheaply cloned per connection) so every connection
-/// handler and, eventually, Phase 6's file watcher, coordinate through the
-/// same `VersionCounter`. `filesystem` is shared the same way (an `Arc`
-/// clone per connection) so `Route::LocalFile` can read files through the
-/// injected `FileSystem` trait rather than calling `std::fs` directly.
-pub fn serve(listener: TcpListener, version: VersionCounter, filesystem: Arc<dyn FileSystem>) {
+/// handler and Phase 6's file watcher coordinate through the same
+/// `VersionCounter`. `filesystem` is shared the same way (an `Arc` clone per
+/// connection) so `Route::LocalFile` and `Route::Document` can read files
+/// through the injected `FileSystem` trait rather than calling `std::fs`
+/// directly. `document` identifies which file `Route::Document` renders and
+/// how (Phase 10.1) — one `DocumentSource` per server instance, matching
+/// Phase 10.6's "one server per open document/tab" design.
+pub fn serve(
+    listener: TcpListener,
+    version: VersionCounter,
+    filesystem: Arc<dyn FileSystem>,
+    document: Arc<DocumentSource>,
+) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let version = version.clone();
                 let filesystem = Arc::clone(&filesystem);
-                thread::spawn(move || handle_connection(stream, &version, &filesystem));
+                let document = Arc::clone(&document);
+                thread::spawn(move || handle_connection(stream, &version, &filesystem, &document));
             }
             // A single failed accept (e.g. a connection reset before we
             // could accept it) shouldn't take down the whole server.
@@ -63,6 +91,7 @@ fn handle_connection(
     mut stream: TcpStream,
     version: &VersionCounter,
     filesystem: &Arc<dyn FileSystem>,
+    document: &DocumentSource,
 ) {
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
@@ -71,7 +100,7 @@ fn handle_connection(
     }
 
     let response = match http::parse_request_line(&line) {
-        Some(req) => respond_to(&req, version, filesystem.as_ref()),
+        Some(req) => respond_to(&req, version, filesystem.as_ref(), document),
         None => bad_request(),
     };
 
@@ -83,14 +112,55 @@ fn handle_connection(
 /// bytes: dispatch the route, then decide what to serve for it. Kept
 /// separate from `handle_connection` so it's testable without any real
 /// socket I/O.
-fn respond_to(req: &Request, version: &VersionCounter, filesystem: &dyn FileSystem) -> Vec<u8> {
+fn respond_to(
+    req: &Request,
+    version: &VersionCounter,
+    filesystem: &dyn FileSystem,
+    document: &DocumentSource,
+) -> Vec<u8> {
     match routes::dispatch(req) {
         Route::Asset(name) => serve_asset(&name),
-        Route::Document => not_implemented(),
+        Route::Document(mode) => serve_document(mode, version, filesystem, document),
         Route::LocalFile(path) => serve_local_file(&path, filesystem),
         Route::WaitForChange(since) => wait_for_change(since, version),
         Route::NotFound => not_found(),
     }
+}
+
+/// Reads the document's file fresh from disk on every request (never
+/// trusting cached content, so a concurrent external edit is always
+/// reflected — the same "re-read fresh" principle the plan calls for
+/// elsewhere, e.g. Phase 14.5's comment writes) and renders it via
+/// `crate::document::render`. A read error (file missing, permission
+/// denied, ...) is reported as a plain 404, matching `serve_local_file`'s
+/// same simplification.
+fn serve_document(
+    mode: routes::Mode,
+    version: &VersionCounter,
+    filesystem: &dyn FileSystem,
+    document: &DocumentSource,
+) -> Vec<u8> {
+    let bytes = match filesystem.read(&document.path) {
+        Ok(bytes) => bytes,
+        Err(_) => return not_found(),
+    };
+    let markdown = String::from_utf8_lossy(&bytes);
+    let base_dir = document.path.parent().unwrap_or_else(|| Path::new("."));
+    let title = document
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let html = document::render(
+        &markdown,
+        base_dir,
+        &title,
+        mode,
+        version.current(),
+        &document.config,
+    );
+    http::format_response(200, &[("Content-Type", "text/html")], html.as_bytes())
 }
 
 /// Blocks (via `version`'s `Condvar`) until the version advances past
@@ -144,13 +214,6 @@ fn not_found() -> Vec<u8> {
     http::format_response(404, &[("Content-Type", "text/plain")], b"Not Found")
 }
 
-fn not_implemented() -> Vec<u8> {
-    // TODO(Phase 5.3+): Route::Document needs render_up/render_down wired
-    // to a specific file — stubbed here until that phase lands.
-    // Route::LocalFile is handled by `serve_local_file` (Phase 5.2).
-    http::format_response(501, &[("Content-Type", "text/plain")], b"Not Implemented")
-}
-
 fn bad_request() -> Vec<u8> {
     http::format_response(400, &[("Content-Type", "text/plain")], b"Bad Request")
 }
@@ -165,6 +228,10 @@ mod respond_to_tests {
 
     fn empty_fs() -> InMemoryFileSystem {
         InMemoryFileSystem::new()
+    }
+
+    fn document_source() -> DocumentSource {
+        DocumentSource::new(PathBuf::from("/docs/notes.md"))
     }
 
     fn req(path: &str) -> Request {
@@ -201,7 +268,12 @@ mod respond_to_tests {
     #[test]
     fn known_asset_is_served_with_200_and_content_type() {
         let version = VersionCounter::new();
-        let response = respond_to(&req("/assets/mud.css"), &version, &empty_fs());
+        let response = respond_to(
+            &req("/assets/mud.css"),
+            &version,
+            &empty_fs(),
+            &document_source(),
+        );
         let text = String::from_utf8(response.clone()).unwrap();
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert!(text.contains("Content-Type: text/css"));
@@ -211,22 +283,67 @@ mod respond_to_tests {
     #[test]
     fn unknown_asset_is_404() {
         let version = VersionCounter::new();
-        let response = respond_to(&req("/assets/does-not-exist.css"), &version, &empty_fs());
+        let response = respond_to(
+            &req("/assets/does-not-exist.css"),
+            &version,
+            &empty_fs(),
+            &document_source(),
+        );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
 
     #[test]
     fn unknown_route_is_404() {
         let version = VersionCounter::new();
-        let response = respond_to(&req("/nonexistent"), &version, &empty_fs());
+        let response = respond_to(
+            &req("/nonexistent"),
+            &version,
+            &empty_fs(),
+            &document_source(),
+        );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
 
     #[test]
-    fn document_route_is_501() {
+    fn document_route_renders_the_configured_file() {
         let version = VersionCounter::new();
-        let response = respond_to(&req("/"), &version, &empty_fs());
-        assert_eq!(status_line(&response), "HTTP/1.1 501 Not Implemented");
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", b"# Hello".to_vec());
+
+        let response = respond_to(&req("/"), &version, &filesystem, &document_source());
+
+        assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
+        let text = String::from_utf8_lossy(&response).into_owned();
+        assert!(text.contains("Content-Type: text/html"));
+        assert!(text.contains("<h1"));
+        assert!(text.contains("up-mode-output"));
+    }
+
+    #[test]
+    fn document_route_with_mode_down_renders_down_mode() {
+        let version = VersionCounter::new();
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", b"line one".to_vec());
+
+        let mut query = HashMap::new();
+        query.insert("mode".to_string(), "down".to_string());
+        let req = Request {
+            method: Method::Get,
+            path: "/".to_string(),
+            query,
+        };
+        let response = respond_to(&req, &version, &filesystem, &document_source());
+
+        assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
+        let text = String::from_utf8_lossy(&response).into_owned();
+        assert!(text.contains("down-mode-output"));
+    }
+
+    #[test]
+    fn document_route_missing_file_is_404() {
+        let version = VersionCounter::new();
+        let response = respond_to(&req("/"), &version, &empty_fs(), &document_source());
+        assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
 
     #[test]
@@ -239,6 +356,7 @@ mod respond_to_tests {
             &req("/local/%2Ftmp%2Fnotes%2Fphoto.png"),
             &version,
             &filesystem,
+            &document_source(),
         );
 
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
@@ -250,7 +368,12 @@ mod respond_to_tests {
     #[test]
     fn local_file_route_absent_from_filesystem_is_404() {
         let version = VersionCounter::new();
-        let response = respond_to(&req("/local/%2Ftmp%2Fmissing.md"), &version, &empty_fs());
+        let response = respond_to(
+            &req("/local/%2Ftmp%2Fmissing.md"),
+            &version,
+            &empty_fs(),
+            &document_source(),
+        );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
 
@@ -264,7 +387,7 @@ mod respond_to_tests {
         });
 
         let start = Instant::now();
-        let response = respond_to(&wait_req(0), &version, &empty_fs());
+        let response = respond_to(&wait_req(0), &version, &empty_fs(), &document_source());
         assert!(start.elapsed() < WAIT_TIMEOUT);
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert_eq!(body_of(&response), r#"{"version":1}"#);
@@ -273,7 +396,7 @@ mod respond_to_tests {
     #[test]
     fn wait_route_times_out_with_unchanged_version() {
         let version = VersionCounter::new();
-        let response = respond_to(&wait_req(0), &version, &empty_fs());
+        let response = respond_to(&wait_req(0), &version, &empty_fs(), &document_source());
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert_eq!(body_of(&response), r#"{"version":0}"#);
     }

@@ -17,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use mudl_server::fs::InMemoryFileSystem;
+use mudl_server::server::DocumentSource;
 use mudl_server::version::VersionCounter;
 use mudl_watch::{PollingChangeSource, RealClock, RealFileSystem};
 
@@ -30,7 +31,10 @@ fn start_server() -> (SocketAddr, VersionCounter) {
     let version = VersionCounter::new();
     let server_version = version.clone();
     let filesystem = Arc::new(InMemoryFileSystem::new());
-    thread::spawn(move || mudl_server::server::serve(listener, server_version, filesystem));
+    let document = Arc::new(DocumentSource::new(PathBuf::from("/docs/notes.md")));
+    thread::spawn(move || {
+        mudl_server::server::serve(listener, server_version, filesystem, document)
+    });
     (addr, version)
 }
 

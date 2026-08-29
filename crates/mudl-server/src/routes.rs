@@ -3,12 +3,20 @@
 
 use crate::http::Request;
 
+/// Which of `render_up`/`render_down` a `/` request wants (Phase 10.2's
+/// mode toggle re-navigates with `?mode=down`; its absence means Up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Up,
+    Down,
+}
+
 /// The route a request maps to, decided purely from its path/query — no
 /// filesystem or socket access happens here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
-    /// `/` — the rendered document.
-    Document,
+    /// `/` — the rendered document, in the given mode.
+    Document(Mode),
     /// `/assets/<name>` — a bundled, embedded static asset.
     Asset(String),
     /// `/local/<percent-encoded-path>` — a local file referenced by the
@@ -22,7 +30,7 @@ pub enum Route {
 /// Maps a parsed [`Request`] to the [`Route`] it should be served by.
 pub fn dispatch(req: &Request) -> Route {
     match req.path.as_str() {
-        "/" => Route::Document,
+        "/" => Route::Document(parse_mode(req.query.get("mode"))),
         "/wait" => match parse_since(req.query.get("since")) {
             Some(since) => Route::WaitForChange(since),
             None => Route::NotFound,
@@ -47,6 +55,17 @@ pub fn dispatch(req: &Request) -> Route {
                 Route::NotFound
             }
         }
+    }
+}
+
+/// `?mode=down` selects Down mode; anything else (including the param's
+/// absence) is Up — there's no malformed-value error case here the way
+/// there is for `since`, since an unrecognized mode is just as reasonably
+/// "not Down" as a missing one.
+fn parse_mode(raw: Option<&String>) -> Mode {
+    match raw.map(String::as_str) {
+        Some("down") => Mode::Down,
+        _ => Mode::Up,
     }
 }
 
@@ -97,8 +116,24 @@ mod tests {
     }
 
     #[test]
-    fn root_is_document() {
-        assert_eq!(dispatch(&req("/", &[])), Route::Document);
+    fn root_with_no_mode_is_document_up() {
+        assert_eq!(dispatch(&req("/", &[])), Route::Document(Mode::Up));
+    }
+
+    #[test]
+    fn root_with_mode_down_is_document_down() {
+        assert_eq!(
+            dispatch(&req("/", &[("mode", "down")])),
+            Route::Document(Mode::Down)
+        );
+    }
+
+    #[test]
+    fn root_with_unrecognized_mode_is_document_up() {
+        assert_eq!(
+            dispatch(&req("/", &[("mode", "sideways")])),
+            Route::Document(Mode::Up)
+        );
     }
 
     #[test]
