@@ -101,7 +101,17 @@ pub fn run(paths: &[PathBuf]) -> Result<(), String> {
         tabs.push(start_tab_source(path, &prefs.borrow())?);
     }
 
-    let application = gtk::Application::new(Some(APP_ID), gtk::gio::ApplicationFlags::empty());
+    // `NON_UNIQUE`: without it, GApplication treats every process sharing
+    // `APP_ID` as one single-instance app — a second `mudl` invocation
+    // would just send an `activate` signal to the already-running first
+    // process (over D-Bus) instead of running its own GTK app, so the
+    // "new" window would actually be `build_window` re-running in the
+    // original process with the original process's `tabs`, i.e. the first
+    // file ever opened. Each invocation must run fully independently.
+    let application = gtk::Application::new(
+        Some(APP_ID),
+        gtk::gio::ApplicationFlags::NON_UNIQUE,
+    );
     application.connect_activate(move |app| {
         build_window(app, &tabs, Rc::clone(&prefs), &prefs_path);
     });
