@@ -1,12 +1,14 @@
 pub mod alerts;
 pub mod emoji;
 pub mod encoding;
+pub mod folder;
 pub mod footnotes;
 pub mod frontmatter;
 pub mod frontmatter_html;
 pub mod headings;
 pub mod images;
 pub mod options;
+pub mod outline;
 pub mod parse;
 pub mod render;
 pub mod resources;
