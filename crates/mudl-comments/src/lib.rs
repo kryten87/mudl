@@ -8,6 +8,7 @@
 //! `mudl-diff`), so this crate does its own `pulldown-cmark` parsing rather
 //! than importing `mudl-core`'s renderer.
 
+pub mod anchor;
 pub mod labels;
 pub mod serialization;
 
