@@ -6,6 +6,7 @@ members = [
     "crates/mudl-watch",
     "crates/mudl-server",
     "crates/mudl-diff",
+    "crates/mudl-comments",
     "crates/mudl-cli",
     "crates/mudl-gui",
 ]

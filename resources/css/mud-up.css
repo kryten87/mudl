@@ -432,6 +432,99 @@ blockquote > :last-child {
 .footnotes.is-print-only { display: none; }
 
 
+/* -- Comments --------------------------------------------------------------
+
+   mudl only ever shows the bottom Comments section (there is no JS-driven
+   "column" projection the way `mud`'s comments-column mode has — the GTK
+   shell's own native "Comments" sidebar pane, Phase 14.7, is the
+   interactive surface instead), so only the read-side rules from `mud`'s
+   mud-comments.css are ported: the inline `💬` marker, the quotation, and
+   the section itself. The capsule/column/header rules that file also
+   carries have no mudl counterpart to style. */
+
+.mud-comment-marker {
+  display: inline-block;
+  font-size: 0.7em;
+  line-height: 1;
+  vertical-align: top;
+  padding: 0.4em;
+  margin: -0.4em 0 0 -0.4em;
+  border-radius: 1em;
+  cursor: pointer;
+  text-decoration: none;
+  user-select: none;
+}
+
+.mud-comment-marker:hover {
+  background-color: var(--code-bg);
+  text-decoration: none;
+}
+
+footer.comments {
+  box-sizing: border-box;
+  overflow-x: hidden;
+  margin: 2em auto 0;
+  padding-top: 1em;
+  border-top: 1px solid var(--border-color);
+  font-size: 0.9em;
+}
+
+.is-readable-column footer.comments {
+  max-width: 800px;
+}
+
+.comments h2 {
+  font-size: 80%;
+  margin: 0 0 1.25rem;
+  border-width: 0;
+  font-weight: 500;
+  text-transform: uppercase;
+  color: var(--blockquote-color);
+}
+
+.comments ol {
+  --list-left-pad: 1.5em;
+}
+
+.comments li {
+  margin-bottom: 1.5em;
+}
+
+.comments li:target {
+  background-color: var(--code-bg);
+}
+
+.mud-comment-quote {
+  margin: 0 0 0.4em;
+  padding-left: 0.8em;
+  border-left: 3px solid var(--border-color);
+  font-style: italic;
+  color: var(--blockquote-color);
+}
+
+.mud-comment-attribution {
+  color: var(--heading-color);
+  font-weight: 500;
+  margin: 0.75rem 0 0.25rem;
+}
+
+.mud-comment-attribution:before {
+  content: '💬 ';
+  margin-left: -0.2rem;
+  margin-right: 0.2rem;
+}
+
+.mud-comment-time {
+  font-weight: normal;
+  opacity: 0.67;
+}
+
+.mud-comment-time:before {
+  content: ' @ ';
+  opacity: 0.5;
+}
+
+
 /* -- Horizontal rules ----------------------------------------------------- */
 
 hr {

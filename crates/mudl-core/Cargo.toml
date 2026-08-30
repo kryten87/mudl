@@ -9,3 +9,4 @@ edition.workspace = true
 # pretty-printer (mudl-core writes its own visitor) or its `getopts` CLI helper.
 pulldown-cmark = { version = "0.13", default-features = false }
 mudl-diff = { path = "../mudl-diff" }
+mudl-comments = { path = "../mudl-comments" }

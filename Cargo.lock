@@ -438,6 +438,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mudl-comments"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+]
+
+[[package]]
 name = "mudl-config"
 version = "0.1.0"
 
@@ -445,6 +452,7 @@ version = "0.1.0"
 name = "mudl-core"
 version = "0.1.0"
 dependencies = [
+ "mudl-comments",
  "mudl-diff",
  "pulldown-cmark",
 ]
@@ -459,6 +467,7 @@ version = "0.1.0"
 dependencies = [
  "gtk",
  "javascriptcore-rs",
+ "mudl-comments",
  "mudl-config",
  "mudl-core",
  "mudl-diff",

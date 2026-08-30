@@ -12,3 +12,4 @@ mudl-diff = { path = "../mudl-diff" }
 mudl-config = { path = "../mudl-config" }
 mudl-server = { path = "../mudl-server" }
 mudl-watch = { path = "../mudl-watch" }
+mudl-comments = { path = "../mudl-comments" }
