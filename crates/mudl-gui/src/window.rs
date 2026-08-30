@@ -77,6 +77,13 @@ struct OpenWindow {
     /// windows (Phase 10.6 tabs aren't added to a window after it's built),
     /// so an index found here stays valid for `notebook`'s lifetime.
     tab_paths: Rc<RefCell<Vec<PathBuf>>>,
+    /// Kept alive only to keep each tab's file watcher running (Phase
+    /// 10.8) — never read again after `build_window` populates it. Without
+    /// this, `TabSource::_watch` would drop (and its poll thread would
+    /// stop) the moment `open_files` returned, since `build_window`
+    /// previously only borrowed `tabs`; a saved edit would then never
+    /// trigger live-reload, since nothing was left polling the file.
+    _tabs: Vec<TabSource>,
 }
 
 /// Every window open in this process. With `ApplicationFlags::HANDLES_OPEN`
@@ -194,7 +201,7 @@ fn open_files(
         return;
     }
 
-    build_window(app, &tabs, Rc::clone(prefs), prefs_path, registry);
+    build_window(app, tabs, Rc::clone(prefs), prefs_path, registry);
 }
 
 /// If `path` (canonicalized) matches a tab in any window `registry` knows
@@ -261,7 +268,7 @@ fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, Strin
 
 fn build_window(
     app: &gtk::Application,
-    tabs: &[TabSource],
+    tabs: Vec<TabSource>,
     prefs: Rc<RefCell<Preferences>>,
     prefs_path: &Path,
     registry: &Registry,
@@ -286,7 +293,7 @@ fn build_window(
     connect_geometry_save(&window, geometry_path, geometry_key);
 
     let notebook = gtk::Notebook::new();
-    for tab in tabs {
+    for tab in &tabs {
         let tab_widget = build_tab(tab, Rc::clone(&prefs), prefs_path, registry);
         let label = gtk::Label::new(Some(&tab.title));
         notebook.append_page(&tab_widget, Some(&label));
@@ -303,6 +310,7 @@ fn build_window(
         window,
         notebook,
         tab_paths,
+        _tabs: tabs,
     });
 }
 
