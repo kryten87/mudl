@@ -9,9 +9,11 @@
 //! than importing `mudl-core`'s renderer.
 
 pub mod anchor;
+pub mod document;
 pub mod editor;
 pub mod labels;
 pub mod serialization;
+pub mod write;
 
 #[cfg(test)]
 mod tests {
