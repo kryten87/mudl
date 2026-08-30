@@ -32,8 +32,7 @@ use std::thread;
 use gtk::prelude::*;
 use javascriptcore::ValueExt;
 use webkit2gtk::{
-    NavigationPolicyDecisionExt, PolicyDecisionExt, PolicyDecisionType, URIRequestExt,
-    WebViewExt,
+    NavigationPolicyDecisionExt, PolicyDecisionExt, PolicyDecisionType, URIRequestExt, WebViewExt,
 };
 
 use mudl_config::Preferences;
@@ -78,6 +77,13 @@ struct OpenWindow {
     /// windows (Phase 10.6 tabs aren't added to a window after it's built),
     /// so an index found here stays valid for `notebook`'s lifetime.
     tab_paths: Rc<RefCell<Vec<PathBuf>>>,
+    /// Kept alive only to keep each tab's file watcher running (Phase
+    /// 10.8) — never read again after `build_window` populates it. Without
+    /// this, `TabSource::_watch` would drop (and its poll thread would
+    /// stop) the moment `open_files` returned, since `build_window`
+    /// previously only borrowed `tabs`; a saved edit would then never
+    /// trigger live-reload, since nothing was left polling the file.
+    _tabs: Vec<TabSource>,
 }
 
 /// Every window open in this process. With `ApplicationFlags::HANDLES_OPEN`
@@ -195,7 +201,7 @@ fn open_files(
         return;
     }
 
-    build_window(app, &tabs, Rc::clone(prefs), prefs_path, registry);
+    build_window(app, tabs, Rc::clone(prefs), prefs_path, registry);
 }
 
 /// If `path` (canonicalized) matches a tab in any window `registry` knows
@@ -262,7 +268,7 @@ fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, Strin
 
 fn build_window(
     app: &gtk::Application,
-    tabs: &[TabSource],
+    tabs: Vec<TabSource>,
     prefs: Rc<RefCell<Preferences>>,
     prefs_path: &Path,
     registry: &Registry,
@@ -287,7 +293,7 @@ fn build_window(
     connect_geometry_save(&window, geometry_path, geometry_key);
 
     let notebook = gtk::Notebook::new();
-    for tab in tabs {
+    for tab in &tabs {
         let tab_widget = build_tab(tab, Rc::clone(&prefs), prefs_path, registry);
         let label = gtk::Label::new(Some(&tab.title));
         notebook.append_page(&tab_widget, Some(&label));
@@ -304,6 +310,7 @@ fn build_window(
         window,
         notebook,
         tab_paths,
+        _tabs: tabs,
     });
 }
 
@@ -380,14 +387,34 @@ fn build_tab(
     connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
     connect_link_navigation(&webview, addr, Rc::clone(registry));
 
-    let headings = extract_headings(&tab.markdown);
-    let outline_tree = outline::build_tree(&headings);
-    let sidebar_view = sidebar::build_outline_tree_view(&outline_tree);
-    connect_sidebar_navigation(&sidebar_view, &webview, Rc::clone(&mode));
+    // Phase 13.9: the "Changes" sidebar pane is an alternative to the
+    // outline pane (Appendix B's `sidebarPane` preference), not a second
+    // widget alongside it — one `gtk::Paned` slot, like the outline pane
+    // always had. `changes_list` is `None` in outline mode; the toolbar's
+    // "Changes since…" popover still overlays the diff in the WebView
+    // either way, it just has nowhere to also list the change groups.
+    let show_changes_pane = prefs.borrow().sidebar_pane == mudl_config::SidebarPane::Changes;
+    let changes_list = if show_changes_pane {
+        let list_view = sidebar::build_changes_list_view();
+        connect_changes_navigation(&list_view, &webview);
+        Some(list_view)
+    } else {
+        None
+    };
+
+    let sidebar_widget: gtk::Widget = if let Some(list_view) = &changes_list {
+        list_view.clone().upcast()
+    } else {
+        let headings = extract_headings(&tab.markdown);
+        let outline_tree = outline::build_tree(&headings);
+        let outline_view = sidebar::build_outline_tree_view(&outline_tree);
+        connect_sidebar_navigation(&outline_view, &webview, Rc::clone(&mode));
+        outline_view.upcast()
+    };
 
     let sidebar_scroller =
         gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-    sidebar_scroller.add(&sidebar_view);
+    sidebar_scroller.add(&sidebar_widget);
     sidebar_scroller.set_size_request(220, -1);
 
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -401,6 +428,7 @@ fn build_tab(
         prefs_path: prefs_path.to_path_buf(),
         document: Arc::clone(&tab.document),
         addr,
+        changes_list,
     };
     let toolbar_widget = toolbar::build(&toolbar_ctx);
 
@@ -486,8 +514,7 @@ fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr, regi
         if decision_type != PolicyDecisionType::NavigationAction {
             return false;
         }
-        let Some(nav_decision) =
-            decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
+        let Some(nav_decision) = decision.downcast_ref::<webkit2gtk::NavigationPolicyDecision>()
         else {
             return false;
         };
@@ -622,6 +649,23 @@ fn connect_sidebar_navigation(
     });
 }
 
+/// Row activation in the Phase 13.9 "Changes" sidebar pane: reads the
+/// activated row's group ID back out of the list store and runs
+/// `sidebar::changes_navigation_script` in the WebView to jump there.
+fn connect_changes_navigation(tree_view: &gtk::TreeView, webview: &webkit2gtk::WebView) {
+    let webview = webview.clone();
+    tree_view.connect_row_activated(move |tree_view, path, _column| {
+        let Some(model) = tree_view.model().and_downcast::<gtk::ListStore>() else {
+            return;
+        };
+        let Some(group_id) = sidebar::group_id_at(&model, path) else {
+            return;
+        };
+        let script = sidebar::changes_navigation_script(&group_id);
+        webview.evaluate_javascript(&script, None, None, None::<&gtk::gio::Cancellable>, |_| {});
+    });
+}
+
 /// Binds a `mudl-server` instance for `path`, seeds it with `config`, and
 /// runs its accept loop on a background thread, and starts watching `path`
 /// for changes on another (Phase 10.8), bumping the same `VersionCounter`
@@ -647,12 +691,15 @@ fn start_server_for(
 
     let document_for_thread = Arc::clone(&document);
     let version_for_server = version.clone();
+    let git_runner: Arc<dyn mudl_diff::git::GitRunner + Send + Sync> =
+        Arc::new(mudl_diff::git::RealGitRunner);
     thread::spawn(move || {
         server::serve(
             listener,
             version_for_server,
             filesystem,
             document_for_thread,
+            git_runner,
         )
     });
 

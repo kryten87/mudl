@@ -351,4 +351,3 @@ mod tests {
         assert_eq!(classes, "is-readable-column");
     }
 }
-

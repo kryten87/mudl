@@ -22,6 +22,7 @@ use mudl_config::{Preferences, Theme};
 use mudl_server::routes::Mode;
 use mudl_server::server::DocumentSource;
 
+use crate::changes;
 use crate::config;
 
 const ZOOM_STEP: f64 = 0.1;
@@ -39,6 +40,10 @@ pub struct Context {
     pub prefs_path: PathBuf,
     pub document: Arc<DocumentSource>,
     pub addr: SocketAddr,
+    /// The Phase 13.9 "Changes" sidebar pane's list view, when the tab was
+    /// built with `sidebar_pane = changes` — `None` in outline mode, where
+    /// there's no group list to refresh after a waypoint pick.
+    pub changes_list: Option<gtk::TreeView>,
 }
 
 impl Context {
@@ -54,10 +59,7 @@ impl Context {
     }
 
     fn document_url(&self) -> String {
-        match self.mode.get() {
-            Mode::Up => format!("http://{}/", self.addr),
-            Mode::Down => format!("http://{}/?mode=down", self.addr),
-        }
+        changes::document_url(self.addr, self.mode.get(), None)
     }
 }
 
@@ -91,7 +93,68 @@ pub fn build(ctx: &Context) -> gtk::Box {
     toolbar.pack_start(&word_wrap, false, false, 0);
     toolbar.pack_start(&readable_column, false, false, 0);
 
+    let changes_button = gtk::MenuButton::new();
+    changes_button.set_label("Changes since…");
+    connect_changes_button(&changes_button, ctx);
+    toolbar.pack_start(&changes_button, false, false, 4);
+
     toolbar
+}
+
+/// Wires the "Changes since…" button: on click, queries the file's git
+/// history fresh (matching every other control here reading live state
+/// rather than a cached snapshot) and pops up `changes::build_popover`
+/// anchored to the button. Picking a row re-navigates the WebView with
+/// `?waypoint=<index>`, so `mudl-server`'s `serve_document` overlays that
+/// diff on the next render.
+fn connect_changes_button(button: &gtk::MenuButton, ctx: &Context) {
+    let ctx = ctx.clone();
+    let button_for_handler = button.clone();
+    button.connect_clicked(move |_| {
+        let current_content = std::fs::read_to_string(&ctx.document.path).unwrap_or_default();
+        let candidates = mudl_diff::git::query_waypoints(
+            &mudl_diff::git::RealGitRunner,
+            &ctx.document.path,
+            &current_content,
+        );
+
+        let ctx_for_select = ctx.clone();
+        let current_content_for_select = current_content.clone();
+        let candidates_for_select = candidates.clone();
+        let popover = changes::build_popover(&candidates, move |index| {
+            let url =
+                changes::document_url(ctx_for_select.addr, ctx_for_select.mode.get(), Some(index));
+            ctx_for_select.webview.load_uri(&url);
+
+            if let Some(list_view) = &ctx_for_select.changes_list {
+                if let Some(candidate) = candidates_for_select.get(index) {
+                    refresh_changes_list(
+                        list_view,
+                        &current_content_for_select,
+                        &candidate.content,
+                    );
+                }
+            }
+        });
+        popover.set_relative_to(Some(&button_for_handler));
+        popover.popup();
+    });
+}
+
+/// Recomputes the block-level `ChangePlan` for `old`/`new` (stripping
+/// frontmatter the same way `render_up` does, so group IDs match what
+/// actually ends up in the rendered DOM) and repopulates the "Changes"
+/// sidebar pane with its groups.
+fn refresh_changes_list(list_view: &gtk::TreeView, old: &str, new: &str) {
+    let old_body = mudl_core::frontmatter::extract(old)
+        .map(|fm| fm.body)
+        .unwrap_or_else(|| old.to_string());
+    let new_body = mudl_core::frontmatter::extract(new)
+        .map(|fm| fm.body)
+        .unwrap_or_else(|| new.to_string());
+    let plan = mudl_core::changes::up_change_plan(&old_body, &new_body, 0.25);
+    let summaries = mudl_core::changes::group_summaries(&plan);
+    crate::sidebar::populate_changes_list(list_view, &summaries);
 }
 
 fn build_theme_combo(ctx: &Context) -> gtk::ComboBoxText {

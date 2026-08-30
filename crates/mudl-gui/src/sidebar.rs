@@ -10,9 +10,11 @@
 
 use gtk::glib;
 use gtk::prelude::*;
+use mudl_core::changes::GroupSummary;
 use mudl_core::headings::{OutlineHeading, OutlineTextSegment};
 use mudl_core::outline::OutlineNode;
 use mudl_core::template::js_string_literal;
+use mudl_diff::plan::GroupType;
 use mudl_server::routes::Mode;
 
 const COLUMN_LABEL: u32 = 0;
@@ -100,6 +102,83 @@ pub fn navigation_script(mode: Mode, slug: &str, line: u64) -> String {
     }
 }
 
+// MARK: - Changes pane (Phase 13.9)
+
+const COLUMN_GROUP_ID: u32 = 0;
+
+/// Builds the empty "Changes" pane list view — populated later by
+/// [`populate_changes_list`] once a waypoint is picked from the toolbar's
+/// "Changes since…" popover (there's nothing to list before that).
+pub fn build_changes_list_view() -> gtk::TreeView {
+    let store = gtk::ListStore::new(&[glib::Type::STRING, glib::Type::STRING]);
+    let tree_view = gtk::TreeView::new();
+    tree_view.set_model(Some(&store));
+    tree_view.set_headers_visible(false);
+
+    let column = gtk::TreeViewColumn::new();
+    let renderer = gtk::CellRendererText::new();
+    gtk::prelude::CellLayoutExt::pack_start(&column, &renderer, true);
+    gtk::prelude::CellLayoutExt::add_attribute(&column, &renderer, "text", 1);
+    tree_view.append_column(&column);
+
+    tree_view
+}
+
+/// Replaces the changes pane's rows with `summaries`, one row per group.
+pub fn populate_changes_list(tree_view: &gtk::TreeView, summaries: &[GroupSummary]) {
+    let Some(model) = tree_view.model() else {
+        return;
+    };
+    let Ok(store) = model.downcast::<gtk::ListStore>() else {
+        return;
+    };
+    store.clear();
+    for summary in summaries {
+        store.insert_with_values(
+            None,
+            &[
+                (COLUMN_GROUP_ID, &summary.group_id),
+                (COLUMN_GROUP_ID + 1, &group_label(summary)),
+            ],
+        );
+    }
+}
+
+fn group_label(summary: &GroupSummary) -> String {
+    let kind = match summary.group_type {
+        GroupType::Ins => "insertion",
+        GroupType::Del => "deletion",
+        GroupType::Mix => "change",
+    };
+    let plural = if summary.change_count == 1 { "" } else { "s" };
+    format!(
+        "{} ({} {kind}{plural})",
+        summary.group_id, summary.change_count
+    )
+}
+
+/// Reads a changes-pane row's group ID back out of `model` at `path`, for a
+/// `row-activated` handler to pass to [`changes_navigation_script`].
+pub fn group_id_at(model: &gtk::ListStore, path: &gtk::TreePath) -> Option<String> {
+    let iter = model.iter(path)?;
+    model
+        .value(&iter, COLUMN_GROUP_ID as i32)
+        .get::<String>()
+        .ok()
+}
+
+/// The JS to run in the WebView when a changes-pane row is activated:
+/// jump to the first element carrying that `data-group-id`, in either
+/// mode (Up mode's block wrappers and Down mode's line `<div>`s both
+/// carry it — see `mudl-core::changes`).
+pub fn changes_navigation_script(group_id: &str) -> String {
+    format!(
+        "(function() {{ var el = document.querySelector('[data-group-id={id}]'); \
+         if (el) el.scrollIntoView({{behavior: \"smooth\", block: \"start\"}}); }})();",
+        id = js_string_literal(group_id)
+    )
+}
+
 #[cfg(test)]
 mod navigation_script_tests {
     use super::*;
@@ -122,5 +201,42 @@ mod navigation_script_tests {
     fn up_mode_slug_is_js_escaped() {
         let script = navigation_script(Mode::Up, "a\"quote", 1);
         assert!(script.contains("getElementById(\"a\\\"quote\")"));
+    }
+}
+
+#[cfg(test)]
+mod changes_pane_tests {
+    use super::*;
+
+    #[test]
+    fn changes_navigation_script_targets_the_group_id_attribute() {
+        let script = changes_navigation_script("group-1");
+        assert!(script.contains("[data-group-id=\"group-1\"]"));
+    }
+
+    #[test]
+    fn group_label_pluralizes_change_count() {
+        let one = GroupSummary {
+            group_id: "group-1".to_string(),
+            group_type: GroupType::Ins,
+            change_count: 1,
+        };
+        let many = GroupSummary {
+            group_id: "group-2".to_string(),
+            group_type: GroupType::Del,
+            change_count: 3,
+        };
+        assert_eq!(group_label(&one), "group-1 (1 insertion)");
+        assert_eq!(group_label(&many), "group-2 (3 deletions)");
+    }
+
+    #[test]
+    fn group_label_describes_mixed_groups_as_changes() {
+        let mixed = GroupSummary {
+            group_id: "group-3".to_string(),
+            group_type: GroupType::Mix,
+            change_count: 2,
+        };
+        assert_eq!(group_label(&mixed), "group-3 (2 changes)");
     }
 }
