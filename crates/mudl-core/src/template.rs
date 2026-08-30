@@ -87,6 +87,18 @@ impl HtmlDocument {
     /// img-src/script-src special-casing described in the implementation
     /// plan. `build_csp` itself stays ignorant of this policy — it only
     /// joins whatever directive strings it's handed.
+    ///
+    /// `connect-src 'self'` has no equivalent in `mud`'s own CSP (its
+    /// Swift host reloads the `WKWebView` natively — no in-page JS ever
+    /// calls out): it's required here because `default-src 'none'`
+    /// otherwise blocks *every* directive with no explicit override,
+    /// `connect-src` included, and the live-reload bootstrap
+    /// (`plan §2`/`resources/js/live-reload.js`) polls `/wait` via
+    /// `fetch()` on every served page. Without it, that fetch is silently
+    /// blocked at the network layer (a CSP violation logged to the
+    /// WebView's own devtools console, never surfaced to the user) and
+    /// live-reload never fires, no matter how correctly the file watcher
+    /// and version counter behave upstream.
     fn csp_directives(&self) -> Vec<String> {
         let mut directives = vec!["default-src 'none'".to_string()];
         if !self.csp_img_src.is_empty() {
@@ -98,6 +110,7 @@ impl HtmlDocument {
         } else {
             directives.push(format!("script-src {}", self.csp_script_src.join(" ")));
         }
+        directives.push("connect-src 'self'".to_string());
         directives
     }
 }
@@ -606,6 +619,14 @@ mod render_tests {
     fn csp_meta_present() {
         let doc = HtmlDocument::default();
         assert!(doc.render().contains("Content-Security-Policy"));
+    }
+
+    #[test]
+    fn csp_allows_same_origin_fetch_for_live_reload() {
+        // Without `connect-src 'self'`, `default-src 'none'` blocks the
+        // live-reload bootstrap's `fetch("/wait?...")` outright.
+        let doc = HtmlDocument::default();
+        assert!(doc.render().contains("connect-src 'self'"));
     }
 
     #[test]
