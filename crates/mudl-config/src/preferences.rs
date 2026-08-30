@@ -66,7 +66,11 @@ enum_pref!(Theme {
 
 enum_pref!(FolderOpenBehavior { Index => "index", Tabs => "tabs" }, default = Index);
 
-enum_pref!(SidebarPane { Outline => "outline", Changes => "changes" }, default = Outline);
+enum_pref!(SidebarPane {
+    Outline => "outline",
+    Changes => "changes",
+    Comments => "comments",
+}, default = Outline);
 
 enum_pref!(DocCAlertMode {
     Off => "off",

@@ -179,6 +179,114 @@ pub fn changes_navigation_script(group_id: &str) -> String {
     )
 }
 
+// MARK: - Comments pane (Phase 14.7)
+
+const COLUMN_COMMENT_LABEL: u32 = 0;
+
+/// Builds the empty "Comments" pane list view — populated by
+/// [`populate_comments_list`] whenever the current comment set changes
+/// (initial load, and after every add/reply/edit/delete goes through
+/// `mudl_comments::write`).
+pub fn build_comments_list_view() -> gtk::TreeView {
+    let store = gtk::ListStore::new(&[glib::Type::STRING, glib::Type::STRING]);
+    let tree_view = gtk::TreeView::new();
+    tree_view.set_model(Some(&store));
+    tree_view.set_headers_visible(false);
+
+    let column = gtk::TreeViewColumn::new();
+    let renderer = gtk::CellRendererText::new();
+    renderer.set_property("wrap-width", 200);
+    gtk::prelude::CellLayoutExt::pack_start(&column, &renderer, true);
+    gtk::prelude::CellLayoutExt::add_attribute(&column, &renderer, "text", 1);
+    tree_view.append_column(&column);
+
+    tree_view
+}
+
+/// Replaces the comments pane's rows with `comments`, one row per comment,
+/// in the order given (`document::parse_comments`'s ordinal order).
+pub fn populate_comments_list(
+    tree_view: &gtk::TreeView,
+    comments: &[mudl_comments::serialization::Comment],
+) {
+    let Some(model) = tree_view.model() else {
+        return;
+    };
+    let Ok(store) = model.downcast::<gtk::ListStore>() else {
+        return;
+    };
+    store.clear();
+    for comment in comments {
+        store.insert_with_values(
+            None,
+            &[
+                (COLUMN_COMMENT_LABEL, &comment.label),
+                (COLUMN_COMMENT_LABEL + 1, &comment_row_label(comment)),
+            ],
+        );
+    }
+}
+
+/// The pane row's preview text for one comment: its quotation (truncated),
+/// an em dash, then its most recent message's body (also truncated) — or
+/// just the message alone for a general (unanchored) comment. Falls back to
+/// "(empty)" for the pathological case of a comment with no messages at
+/// all (shouldn't happen in practice — `mudl_comments::editor` never
+/// produces one — but a row that renders nothing would be worse than one
+/// that says so).
+fn comment_row_label(comment: &mudl_comments::serialization::Comment) -> String {
+    let last_body = comment
+        .messages
+        .last()
+        .map(|m| truncate(&m.body, 60))
+        .unwrap_or_else(|| "(empty)".to_string());
+    match &comment.quotation {
+        Some(quotation) if !quotation.is_empty() => {
+            format!(
+                "\u{201C}{}\u{201D} \u{2014} {last_body}",
+                truncate(quotation, 40)
+            )
+        }
+        _ => last_body,
+    }
+}
+
+/// Truncates `text` to at most `max_chars` characters (not bytes — a
+/// mid-multi-byte-character cut would produce invalid UTF-8), appending an
+/// ellipsis when it does.
+fn truncate(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}\u{2026}")
+    } else {
+        head
+    }
+}
+
+/// Reads a comments-pane row's label back out of `model` at `path`, for a
+/// `row-activated` handler to pass to [`comment_navigation_script`], or for
+/// a reply/edit/delete action to pass to `mudl_comments::write`.
+pub fn comment_label_at(model: &gtk::ListStore, path: &gtk::TreePath) -> Option<String> {
+    let iter = model.iter(path)?;
+    model
+        .value(&iter, COLUMN_COMMENT_LABEL as i32)
+        .get::<String>()
+        .ok()
+}
+
+/// The JS to run in the WebView when a comments-pane row is activated:
+/// jump to that comment's `id="cmt-<label>"` element in the bottom Comments
+/// section (Up mode only — Down mode's raw-source view has no such
+/// element, so this harmlessly finds nothing there).
+pub fn comment_navigation_script(label: &str) -> String {
+    format!(
+        "(function() {{ var el = document.getElementById({id}); \
+         if (el) el.scrollIntoView({{behavior: \"smooth\", block: \"start\"}}); }})();",
+        id = js_string_literal(&format!("cmt-{label}"))
+    )
+}
+
 #[cfg(test)]
 mod navigation_script_tests {
     use super::*;
@@ -238,5 +346,68 @@ mod changes_pane_tests {
             change_count: 2,
         };
         assert_eq!(group_label(&mixed), "group-3 (2 changes)");
+    }
+}
+
+#[cfg(test)]
+mod comments_pane_tests {
+    use super::*;
+    use mudl_comments::serialization::{Comment, CommentMessage};
+
+    fn message(body: &str) -> CommentMessage {
+        CommentMessage {
+            author: None,
+            created: None,
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn comment_navigation_script_targets_the_comment_id() {
+        let script = comment_navigation_script("comment-a");
+        assert!(script.contains("getElementById(\"cmt-comment-a\")"));
+    }
+
+    #[test]
+    fn row_label_combines_quotation_and_last_message() {
+        let comment = Comment {
+            label: "comment-a".to_string(),
+            ordinal: 1,
+            quotation: Some("quick brown fox".to_string()),
+            messages: vec![message("First."), message("Nice catch!")],
+        };
+        assert_eq!(
+            comment_row_label(&comment),
+            "\u{201C}quick brown fox\u{201D} \u{2014} Nice catch!"
+        );
+    }
+
+    #[test]
+    fn row_label_for_a_general_comment_is_just_the_message() {
+        let comment = Comment {
+            label: "comment-a".to_string(),
+            ordinal: 1,
+            quotation: None,
+            messages: vec![message("A general note.")],
+        };
+        assert_eq!(comment_row_label(&comment), "A general note.");
+    }
+
+    #[test]
+    fn row_label_truncates_long_text_with_an_ellipsis() {
+        let comment = Comment {
+            label: "comment-a".to_string(),
+            ordinal: 1,
+            quotation: None,
+            messages: vec![message(&"x".repeat(100))],
+        };
+        let label = comment_row_label(&comment);
+        assert!(label.ends_with('\u{2026}'));
+        assert!(label.chars().count() <= 61);
+    }
+
+    #[test]
+    fn truncate_leaves_short_text_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
     }
 }

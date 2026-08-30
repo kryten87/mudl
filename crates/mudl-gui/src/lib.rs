@@ -2,6 +2,7 @@
 //! `docs/IMPLEMENTATION-PLAN.md`).
 
 mod changes;
+mod comments;
 mod config;
 mod find;
 mod geometry;

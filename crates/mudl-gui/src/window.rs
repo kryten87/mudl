@@ -44,6 +44,7 @@ use mudl_server::routes::Mode;
 use mudl_server::server::{self, DocumentSource};
 use mudl_server::version::VersionCounter;
 
+use crate::comments;
 use crate::find;
 use crate::geometry;
 use crate::sidebar;
@@ -387,14 +388,16 @@ fn build_tab(
     connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
     connect_link_navigation(&webview, addr, Rc::clone(registry));
 
-    // Phase 13.9: the "Changes" sidebar pane is an alternative to the
-    // outline pane (Appendix B's `sidebarPane` preference), not a second
-    // widget alongside it — one `gtk::Paned` slot, like the outline pane
-    // always had. `changes_list` is `None` in outline mode; the toolbar's
-    // "Changes since…" popover still overlays the diff in the WebView
-    // either way, it just has nowhere to also list the change groups.
-    let show_changes_pane = prefs.borrow().sidebar_pane == mudl_config::SidebarPane::Changes;
-    let changes_list = if show_changes_pane {
+    // Phase 13.9/14.7: the "Changes" and "Comments" sidebar panes are each
+    // an alternative to the outline pane (Appendix B's `sidebarPane`
+    // preference), not a second widget alongside it — one `gtk::Paned`
+    // slot, like the outline pane always had. `changes_list` is `None`
+    // outside changes mode; the toolbar's "Changes since…" popover still
+    // overlays the diff in the WebView either way, it just has nowhere to
+    // also list the change groups.
+    let sidebar_pane = prefs.borrow().sidebar_pane;
+
+    let changes_list = if sidebar_pane == mudl_config::SidebarPane::Changes {
         let list_view = sidebar::build_changes_list_view();
         connect_changes_navigation(&list_view, &webview);
         Some(list_view)
@@ -402,20 +405,44 @@ fn build_tab(
         None
     };
 
-    let sidebar_widget: gtk::Widget = if let Some(list_view) = &changes_list {
-        list_view.clone().upcast()
-    } else {
-        let headings = extract_headings(&tab.markdown);
-        let outline_tree = outline::build_tree(&headings);
-        let outline_view = sidebar::build_outline_tree_view(&outline_tree);
-        connect_sidebar_navigation(&outline_view, &webview, Rc::clone(&mode));
-        outline_view.upcast()
-    };
-
     let sidebar_scroller =
         gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-    sidebar_scroller.add(&sidebar_widget);
     sidebar_scroller.set_size_request(220, -1);
+    match sidebar_pane {
+        mudl_config::SidebarPane::Changes => {
+            sidebar_scroller.add(changes_list.as_ref().unwrap());
+        }
+        mudl_config::SidebarPane::Comments => {
+            // Unlike Outline/Changes (a single `TreeView` that overflows
+            // into `sidebar_scroller`'s own scrollbar), the Comments pane
+            // is itself a column (list + compose box below it), so it
+            // manages its own scrolling for just the list and packs
+            // directly into the outer scroller's viewport rather than
+            // adding a second, redundant layer of scrolling around the
+            // whole column.
+            let list_view = sidebar::build_comments_list_view();
+            connect_comments_navigation(&list_view, &webview);
+            let list_scroller =
+                gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+            list_scroller.add(&list_view);
+
+            let comments_ctx = comments::Context {
+                list_view,
+                path: tab.path.clone(),
+            };
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            column.pack_start(&list_scroller, true, true, 0);
+            column.pack_start(&comments::build(&comments_ctx), false, false, 0);
+            sidebar_scroller.add(&column);
+        }
+        mudl_config::SidebarPane::Outline => {
+            let headings = extract_headings(&tab.markdown);
+            let outline_tree = outline::build_tree(&headings);
+            let outline_view = sidebar::build_outline_tree_view(&outline_tree);
+            connect_sidebar_navigation(&outline_view, &webview, Rc::clone(&mode));
+            sidebar_scroller.add(&outline_view);
+        }
+    }
 
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.pack1(&sidebar_scroller, false, false);
@@ -662,6 +689,23 @@ fn connect_changes_navigation(tree_view: &gtk::TreeView, webview: &webkit2gtk::W
             return;
         };
         let script = sidebar::changes_navigation_script(&group_id);
+        webview.evaluate_javascript(&script, None, None, None::<&gtk::gio::Cancellable>, |_| {});
+    });
+}
+
+/// Row activation in the Phase 14.7 "Comments" sidebar pane: reads the
+/// activated row's label back out of the list store and runs
+/// `sidebar::comment_navigation_script` in the WebView to jump there.
+fn connect_comments_navigation(tree_view: &gtk::TreeView, webview: &webkit2gtk::WebView) {
+    let webview = webview.clone();
+    tree_view.connect_row_activated(move |tree_view, path, _column| {
+        let Some(model) = tree_view.model().and_downcast::<gtk::ListStore>() else {
+            return;
+        };
+        let Some(label) = sidebar::comment_label_at(&model, path) else {
+            return;
+        };
+        let script = sidebar::comment_navigation_script(&label);
         webview.evaluate_javascript(&script, None, None, None::<&gtk::gio::Cancellable>, |_| {});
     });
 }
