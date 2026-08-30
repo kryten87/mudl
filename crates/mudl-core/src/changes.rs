@@ -163,14 +163,70 @@ fn build_up_overlay(plan: &ChangePlan) -> UpOverlay {
     }
 }
 
-/// Computes the Up-mode overlay for diffing `old_markdown` (already
-/// frontmatter-stripped) against `new_markdown` (ditto).
-pub fn up_overlay(old_markdown: &str, new_markdown: &str, word_diff_threshold: f64) -> UpOverlay {
+/// Computes the [`ChangePlan`] for diffing `old_markdown` against
+/// `new_markdown` (both already frontmatter-stripped) over the block kinds
+/// [`collect_leaf_blocks`] tracks. Public so a GUI sidebar (Phase 13.9) can
+/// list the plan's change groups without re-deriving this wiring —
+/// `up_overlay` is just this plus [`build_up_overlay`].
+pub fn up_change_plan(
+    old_markdown: &str,
+    new_markdown: &str,
+    word_diff_threshold: f64,
+) -> ChangePlan {
     let old_blocks = collect_leaf_blocks(old_markdown);
     let new_blocks = collect_leaf_blocks(new_markdown);
     let matches = mudl_diff::block::match_blocks(&old_blocks, &new_blocks);
-    let plan = ChangePlan::build(&matches, word_diff_threshold);
-    build_up_overlay(&plan)
+    ChangePlan::build(&matches, word_diff_threshold)
+}
+
+/// Computes the Up-mode overlay for diffing `old_markdown` (already
+/// frontmatter-stripped) against `new_markdown` (ditto).
+pub fn up_overlay(old_markdown: &str, new_markdown: &str, word_diff_threshold: f64) -> UpOverlay {
+    build_up_overlay(&up_change_plan(
+        old_markdown,
+        new_markdown,
+        word_diff_threshold,
+    ))
+}
+
+/// One entry in a "Changes" sidebar: a change group's ID, content type,
+/// and how many changes it holds, in ascending group order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupSummary {
+    pub group_id: String,
+    pub group_type: mudl_diff::plan::GroupType,
+    pub change_count: usize,
+}
+
+/// Summarizes `plan`'s change groups (both the Up-mode block-level groups
+/// and the Down-mode line-level groups a caller passes in the same
+/// `ChangePlan` shape) in ascending `group_index` order, one entry per
+/// distinct group ID.
+pub fn group_summaries(plan: &ChangePlan) -> Vec<GroupSummary> {
+    let mut by_group: HashMap<&str, (mudl_diff::plan::GroupType, usize, usize)> = HashMap::new();
+    for info in plan.group_info.values() {
+        let entry = by_group.entry(info.group_id.as_str()).or_insert((
+            info.group_type,
+            info.group_index,
+            0,
+        ));
+        entry.2 += 1;
+    }
+    let mut indexed: Vec<(usize, GroupSummary)> = by_group
+        .into_iter()
+        .map(|(group_id, (group_type, group_index, change_count))| {
+            (
+                group_index,
+                GroupSummary {
+                    group_id: group_id.to_string(),
+                    group_type,
+                    change_count,
+                },
+            )
+        })
+        .collect();
+    indexed.sort_by_key(|(index, _)| *index);
+    indexed.into_iter().map(|(_, summary)| summary).collect()
 }
 
 impl UpOverlay {
@@ -414,5 +470,39 @@ mod tests {
         assert_eq!(annotations, vec!["u", "d", "i", "u"]);
         assert_eq!(lines[1].text, "b");
         assert_eq!(lines[2].text, "x");
+    }
+
+    // --- group_summaries ---
+
+    #[test]
+    fn no_changes_summarizes_to_no_groups() {
+        let plan = up_change_plan("Same.\n", "Same.\n", 0.25);
+        assert!(group_summaries(&plan).is_empty());
+    }
+
+    #[test]
+    fn adjacent_changes_summarize_to_one_mixed_group() {
+        let plan = up_change_plan(
+            "First.\n\nOld one.\n\nLast.\n",
+            "First.\n\nNew one.\n\nLast.\n",
+            0.25,
+        );
+        let summaries = group_summaries(&plan);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].group_type, mudl_diff::plan::GroupType::Mix);
+        assert_eq!(summaries[0].change_count, 2);
+    }
+
+    #[test]
+    fn separate_gaps_summarize_in_ascending_order() {
+        let plan = up_change_plan(
+            "Old one.\n\nAnchor.\n\nOld two.\n",
+            "New one.\n\nAnchor.\n\nNew two.\n",
+            0.25,
+        );
+        let summaries = group_summaries(&plan);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].group_id, "group-1");
+        assert_eq!(summaries[1].group_id, "group-2");
     }
 }

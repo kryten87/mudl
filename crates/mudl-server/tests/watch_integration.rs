@@ -32,8 +32,10 @@ fn start_server() -> (SocketAddr, VersionCounter) {
     let server_version = version.clone();
     let filesystem = Arc::new(InMemoryFileSystem::new());
     let document = Arc::new(DocumentSource::new(PathBuf::from("/docs/notes.md")));
+    let git_runner: Arc<dyn mudl_diff::git::GitRunner + Send + Sync> =
+        Arc::new(mudl_diff::git::ScriptedGitRunner::new());
     thread::spawn(move || {
-        mudl_server::server::serve(listener, server_version, filesystem, document)
+        mudl_server::server::serve(listener, server_version, filesystem, document, git_runner)
     });
     (addr, version)
 }
