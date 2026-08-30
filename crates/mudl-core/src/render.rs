@@ -840,8 +840,11 @@ impl<'a> Renderer<'a> {
                 "<a class=\"mud-comment-marker\" id=\"cmtref-{escaped}\" href=\"#cmt-{escaped}\">\u{1F4AC}</a>"
             ));
         } else if let Some(&number) = self.footnote_numbers.get(label) {
+            // `footnote-ref` matches `mud`'s own class (and the selector
+            // already bundled in `mud-up.css` since Phase 3) so the marker
+            // gets its chip styling instead of rendering as a bare number.
             self.out.push_str(&format!(
-                "<sup id=\"fnref-{escaped}\"><a href=\"#fn-{escaped}\">{number}</a></sup>"
+                "<sup class=\"footnote-ref\" id=\"fnref-{escaped}\"><a href=\"#fn-{escaped}\">{number}</a></sup>"
             ));
         }
     }

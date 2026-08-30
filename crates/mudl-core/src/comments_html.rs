@@ -177,7 +177,8 @@ mod tests {
     fn referenced_footnote_appears_numbered() {
         let markdown = "Text.[^1]\n\n[^1]: A note.\n";
         let html = render(markdown);
-        assert!(html.contains("<sup id=\"fnref-1\"><a href=\"#fn-1\">1</a></sup>"));
+        assert!(html
+            .contains("<sup class=\"footnote-ref\" id=\"fnref-1\"><a href=\"#fn-1\">1</a></sup>"));
         assert!(html.contains("<section class=\"footnotes\">"));
         assert!(html.contains("id=\"fn-1\" data-mud-footnote-number=\"1\""));
         assert!(html.contains("A note."));
