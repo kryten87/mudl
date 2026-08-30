@@ -438,6 +438,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mudl-comments"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+]
+
+[[package]]
 name = "mudl-config"
 version = "0.1.0"
 
