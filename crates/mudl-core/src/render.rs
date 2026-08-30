@@ -11,14 +11,17 @@
 //! matching `End` included, by the recursive call before `children()`'s
 //! loop sees another event. That's what lets a handful of small methods
 //! stand in for a full AST visitor without building one.
+use std::collections::HashMap;
 use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Tag, TagEnd};
 
 use crate::alerts::{detect_docc_aside, detect_gfm_alert, parse_aside_tag, AlertCategory};
 use crate::changes::{self, UpOverlay};
+use crate::comments_html::{comments_section, footnotes_section};
 use crate::emoji::replace_shortcodes;
 use crate::encoding::html_escape;
+use crate::footnotes::is_comment_label;
 use crate::frontmatter::{self, parse_top_level_keys};
 use crate::frontmatter_html::render_table as render_frontmatter_table;
 use crate::options::RenderOptions;
@@ -52,6 +55,7 @@ pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
     });
 
     let parsed = ParsedMarkdown::new(&body);
+    let footnote_numbers = number_footnotes(&parsed.events);
     let mut renderer = Renderer {
         events: &parsed.events,
         pos: 0,
@@ -63,12 +67,42 @@ pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
         cell_index: 0,
         skip_leading_dollar: false,
         overlay: overlay.as_ref(),
+        footnote_numbers: &footnote_numbers,
     };
     renderer.run();
     if let Some(overlay) = &overlay {
         renderer.out.push_str(overlay.trailing_deletions());
     }
+    renderer
+        .out
+        .push_str(&footnotes_section(&body, &footnote_numbers, options));
+    renderer.out.push_str(&comments_section(&body, options));
     renderer.out
+}
+
+/// Assigns each *authorial* (non-comment) footnote label a 1-based display
+/// number in first-reference order, over the same event stream `render_up`
+/// walks -- comments occupy no number and leave no gap, matching `mud`'s
+/// `FootnoteProcessor.process`. A reference nested inside another
+/// footnote/comment's own definition is (unlike `mud`) not excluded from
+/// this count -- a narrow, deliberate scope cut, since a footnote that
+/// self-references is vanishingly rare and excluding it would need this
+/// walk to also track definition boundaries, which it otherwise has no use
+/// for (the definition-body skip in `render_container_inner` handles the
+/// exclusion structurally, by discarding the nested marker's *output*
+/// rather than by never assigning it a number).
+fn number_footnotes(events: &[(Event, Range<usize>)]) -> HashMap<String, u32> {
+    let mut numbers = HashMap::new();
+    let mut next_number = 1u32;
+    for (event, _) in events {
+        if let Event::FootnoteReference(label) = event {
+            if !is_comment_label(label) && !numbers.contains_key(label.as_ref()) {
+                numbers.insert(label.to_string(), next_number);
+                next_number += 1;
+            }
+        }
+    }
+    numbers
 }
 
 // ---------------------------------------------------------------------
@@ -159,6 +193,10 @@ struct Renderer<'a> {
     /// that exactly like "this block has no annotation", so the whole
     /// feature is a no-op when it's off.
     overlay: Option<&'a UpOverlay>,
+    /// Authorial footnote label -> 1-based display number (Phase 14.6),
+    /// computed once by `number_footnotes` before the walk begins so a
+    /// `FootnoteReference` can render its marker without re-scanning.
+    footnote_numbers: &'a HashMap<String, u32>,
 }
 
 impl<'a> Renderer<'a> {
@@ -412,14 +450,29 @@ impl<'a> Renderer<'a> {
             Tag::Image {
                 dest_url, title, ..
             } => self.render_image(&dest_url, &title),
+            // A footnote/comment definition's body renders separately, in
+            // the bottom Footnotes/Comments section (`footnotes_section`/
+            // `comments_section`) — never inline where it's *defined*, only
+            // where it's *referenced* (a superscript number or a `💬`
+            // marker, from `Event::FootnoteReference` below). So its
+            // subtree is still walked (`children()` advances `self.pos`
+            // past the whole balanced definition, exactly like every other
+            // container), but the HTML it would have produced is
+            // discarded: swap in a scratch buffer for the duration, matching
+            // the visitor's "consume the whole balanced subtree" shape
+            // rather than adding a second traversal mode.
+            Tag::FootnoteDefinition(_) => {
+                let discarded = std::mem::take(&mut self.out);
+                self.children();
+                self.out = discarded;
+            }
             // None of these are ever produced by the `Options` bitset
-            // `parser_options` turns on (footnotes are deferred to Phase
-            // 14; definition lists, sub/superscript, heading attributes,
-            // and metadata blocks are never enabled at all) — kept so the
-            // match stays exhaustive if that ever changes, rendering inner
-            // content with no wrapper rather than panicking.
-            Tag::FootnoteDefinition(_)
-            | Tag::DefinitionList
+            // `parser_options` turns on (definition lists, sub/superscript,
+            // heading attributes, and metadata blocks are never enabled at
+            // all) — kept so the match stays exhaustive if that ever
+            // changes, rendering inner content with no wrapper rather than
+            // panicking.
+            Tag::DefinitionList
             | Tag::DefinitionListTitle
             | Tag::DefinitionListDefinition
             | Tag::Superscript
@@ -475,10 +528,11 @@ impl<'a> Renderer<'a> {
                         .push_str("<input type=\"checkbox\" disabled=\"\" /> ");
                 }
             }
-            // Math and footnotes are not enabled by `parser_options`; these
-            // variants cannot be produced by the parser today. No-op
-            // rather than making the match non-exhaustive.
-            Event::InlineMath(_) | Event::DisplayMath(_) | Event::FootnoteReference(_) => {}
+            // Math is not enabled by `parser_options`; these variants
+            // cannot be produced by the parser today. No-op rather than
+            // making the match non-exhaustive.
+            Event::InlineMath(_) | Event::DisplayMath(_) => {}
+            Event::FootnoteReference(label) => self.render_footnote_reference(&label),
             // Only ever produced as a child of `Tag::HtmlBlock`, which
             // `render_html_block` consumes directly rather than going
             // through `step`/`render_leaf` — unreachable here in practice.
@@ -768,6 +822,28 @@ impl<'a> Renderer<'a> {
             self.out.push('"');
         }
         self.out.push_str(" />");
+    }
+
+    // MARK: - Footnotes and comments
+
+    /// Renders a `[^label]` marker inline: a superscript numbered backlink
+    /// for an authorial footnote, a `💬` marker for a comment (`mud`'s own
+    /// glyph for the same purpose). `self.footnote_numbers` is populated
+    /// for every authorial label the parser resolved a reference to (see
+    /// `number_footnotes`), so the number lookup always succeeds for a
+    /// non-comment label reaching here; a comment label is never in that
+    /// map at all, hence the `is_comment_label` check first.
+    fn render_footnote_reference(&mut self, label: &str) {
+        let escaped = html_escape(label);
+        if is_comment_label(label) {
+            self.out.push_str(&format!(
+                "<a class=\"mud-comment-marker\" id=\"cmtref-{escaped}\" href=\"#cmt-{escaped}\">\u{1F4AC}</a>"
+            ));
+        } else if let Some(&number) = self.footnote_numbers.get(label) {
+            self.out.push_str(&format!(
+                "<sup id=\"fnref-{escaped}\"><a href=\"#fn-{escaped}\">{number}</a></sup>"
+            ));
+        }
     }
 }
 

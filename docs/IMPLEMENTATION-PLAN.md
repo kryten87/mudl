@@ -969,14 +969,36 @@ mode" case).
     reusing Phase 7.4's `FileSystem::write_atomic`), surface a typed error
     (`anchor_failed` vs. `write_failed`) to the GUI layer.
 
-14.6 **[P]** GTK comment column (mirrors `mud`'s comments sidebar/column):
-    compose box, reply/edit/delete affordances, wired to 14.5's write flow.
-    Comment authoring UI is the one place a specific, isolated exception to
-    "prefer polling over native OS hooks" might be worth revisiting (e.g. if
-    typing latency during compose feels laggy under 300ms polling) — if so,
-    that's the natural point to introduce the `inotify` swap noted in
-    Phase 6.3, made easy precisely because `ChangeSource` was designed as a
-    trait from the start.
+14.6 **[S, depends on 14.1–14.5]** Wire footnotes and comments into
+    `render_up`/`render_down` — the step the phase intro promises
+    ("touches Phase 2's rendering code") but that wasn't itemized above.
+    Necessary groundwork for 14.7: Phase 2.1 deliberately left
+    `Options::ENABLE_FOOTNOTES` off ("deferred to Phase 14"), so plain GFM
+    footnotes don't render at all yet either, not just comments. Enable it;
+    render a `[^label]` reference as a superscript numbered backlink
+    (authorial) or a `💬` marker (comment, via
+    `mudl_core::footnotes::is_comment_label`); skip a definition's body
+    where it appears inline (rendered separately below, not twice — swap
+    `Renderer::out` to a scratch buffer for the duration of `Tag::
+    FootnoteDefinition`'s subtree, discard it, matching the existing
+    visitor's "consume the whole balanced subtree" shape rather than adding
+    a new traversal mode); append a bottom Footnotes section (numbered,
+    referenced-only entries) and a bottom Comments section (quotation +
+    threaded messages, reusing `mudl_comments::serialization::
+    format_timestamp`/`iso_timestamp` for each message's `<time>`) after
+    the body. `mudl-core` depends on the new `mudl-comments` crate for
+    this (`mudl_comments::document::parse_footnotes`/`parse_comments`,
+    Phase 14.5's by-product) — the same dependency direction as
+    `mudl-diff`, so `mudl-comments` still never depends on `mudl-core`.
+
+14.7 **[P, depends on 14.6]** GTK comment column (mirrors `mud`'s comments
+    sidebar/column): compose box, reply/edit/delete affordances, wired to
+    14.5's write flow. Comment authoring UI is the one place a specific,
+    isolated exception to "prefer polling over native OS hooks" might be
+    worth revisiting (e.g. if typing latency during compose feels laggy
+    under 300ms polling) — if so, that's the natural point to introduce the
+    `inotify` swap noted in Phase 6.3, made easy precisely because
+    `ChangeSource` was designed as a trait from the start.
 
 
 ## Appendix A — Step summary by parallelizability

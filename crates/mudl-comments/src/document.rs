@@ -108,6 +108,52 @@ pub fn parse_comments(source: &str) -> Vec<Comment> {
         .collect()
 }
 
+/// An authorial (non-comment) footnote definition, for `mudl-core`'s bottom
+/// Footnotes section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FootnoteEntry {
+    pub label: String,
+    /// De-indented body Markdown, ready to render.
+    pub body_markdown: String,
+}
+
+/// Collects every *authorial* footnote definition in `source` -- everything
+/// `[^label]:` defines except a comment (`is_comment_label`). Definition
+/// order; `mudl-core` assigns display numbers itself from first-reference
+/// order (the same walk it already does to render markers), dropping any
+/// entry that numbering doesn't reach (no reference anywhere resolves to
+/// it), matching `mud`'s "an unreferenced footnote definition doesn't
+/// appear in the section" rule.
+pub fn parse_footnotes(source: &str) -> Vec<FootnoteEntry> {
+    if !source.contains("[^") {
+        return Vec::new();
+    }
+    let events: Vec<(Event, Range<usize>)> = Parser::new_ext(source, parser_options())
+        .into_offset_iter()
+        .collect();
+
+    let mut entries = Vec::new();
+    let mut i = 0;
+    while i < events.len() {
+        if let Event::Start(Tag::FootnoteDefinition(label)) = &events[i].0 {
+            let label = label.to_string();
+            let end_idx = block_end_index(&events, i);
+            if !is_comment_label(&label) {
+                let children = direct_child_ranges(&events, i + 1, end_idx);
+                let body_markdown = join_body_markdown(source, &children);
+                entries.push(FootnoteEntry {
+                    label,
+                    body_markdown,
+                });
+            }
+            i = end_idx + 1;
+            continue;
+        }
+        i += 1;
+    }
+    entries
+}
+
 /// The index of the `End` event matching the `Start` at `start_idx`
 /// (depth-counting every nested `Start`/`End` regardless of kind).
 fn block_end_index(events: &[(Event, Range<usize>)], start_idx: usize) -> usize {
@@ -238,6 +284,37 @@ mod tests {
         assert_eq!(comments.len(), 2);
         assert_eq!(comments[0].label, "comment-a");
         assert_eq!(comments[1].label, "comment-b");
+    }
+
+    // MARK: - parse_footnotes
+
+    #[test]
+    fn no_footnotes_is_empty() {
+        assert!(parse_footnotes("Plain text, no footnotes.\n").is_empty());
+    }
+
+    #[test]
+    fn authorial_footnote_is_collected() {
+        let source = "Text.[^1]\n\n[^1]: An authorial footnote.\n";
+        let footnotes = parse_footnotes(source);
+        assert_eq!(footnotes.len(), 1);
+        assert_eq!(footnotes[0].label, "1");
+        assert_eq!(footnotes[0].body_markdown, "An authorial footnote.");
+    }
+
+    #[test]
+    fn comment_definitions_are_not_footnotes() {
+        let source = "Text.[^comment-a]\n\n[^comment-a]: A comment.\n";
+        assert!(parse_footnotes(source).is_empty());
+    }
+
+    #[test]
+    fn footnotes_and_comments_coexist() {
+        let source = "Text.[^1][^comment-a]\n\n\
+             [^1]: A footnote.\n\n\
+             [^comment-a]: A comment.\n";
+        assert_eq!(parse_footnotes(source).len(), 1);
+        assert_eq!(parse_comments(source).len(), 1);
     }
 
     #[test]

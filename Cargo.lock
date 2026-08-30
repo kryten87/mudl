@@ -452,6 +452,7 @@ version = "0.1.0"
 name = "mudl-core"
 version = "0.1.0"
 dependencies = [
+ "mudl-comments",
  "mudl-diff",
  "pulldown-cmark",
 ]
