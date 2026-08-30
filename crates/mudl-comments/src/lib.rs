@@ -9,6 +9,7 @@
 //! than importing `mudl-core`'s renderer.
 
 pub mod anchor;
+pub mod editor;
 pub mod labels;
 pub mod serialization;
 
