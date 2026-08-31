@@ -63,8 +63,20 @@ impl Context {
     }
 }
 
+/// The subset of the toolbar's controls the menu bar (Phase 15.5) drives
+/// directly instead of duplicating their logic — e.g. the menu's Zoom In
+/// item calls `zoom_in.clicked()` rather than reimplementing
+/// `connect_zoom_button`'s body.
+#[derive(Clone)]
+pub struct ToolbarWidgets {
+    pub zoom_in: gtk::Button,
+    pub zoom_out: gtk::Button,
+    pub readable_column: gtk::ToggleButton,
+    pub theme_combo: gtk::ComboBoxText,
+}
+
 /// Builds the toolbar widget and wires every control's signal handler.
-pub fn build(ctx: &Context) -> gtk::Box {
+pub fn build(ctx: &Context) -> (gtk::Box, ToolbarWidgets) {
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
 
     let theme_combo = build_theme_combo(ctx);
@@ -98,7 +110,13 @@ pub fn build(ctx: &Context) -> gtk::Box {
     connect_changes_button(&changes_button, ctx);
     toolbar.pack_start(&changes_button, false, false, 4);
 
-    toolbar
+    let widgets = ToolbarWidgets {
+        zoom_in,
+        zoom_out,
+        readable_column,
+        theme_combo,
+    };
+    (toolbar, widgets)
 }
 
 /// Wires the "Changes since…" button: on click, queries the file's git
@@ -183,27 +201,36 @@ fn build_theme_combo(ctx: &Context) -> gtk::ComboBoxText {
     combo
 }
 
+/// Sets the current mode's zoom level to `value` (clamped to
+/// `ZOOM_RANGE`), applies it to the live `WebView`, and persists it.
+/// Extracted (Phase 15.3) so both `connect_zoom_button`'s delta-based
+/// buttons and the menu's absolute-value "Actual Size" item share one
+/// implementation.
+pub fn set_zoom(ctx: &Context, value: f64) {
+    let mode = ctx.mode.get();
+    let clamped = value.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
+    {
+        let mut prefs = ctx.prefs.borrow_mut();
+        match mode {
+            Mode::Up => prefs.up_mode_zoom_level = clamped,
+            Mode::Down => prefs.down_mode_zoom_level = clamped,
+        }
+    }
+    ctx.webview.set_zoom_level(clamped);
+    ctx.save_and_apply();
+}
+
 fn connect_zoom_button(button: &gtk::Button, ctx: &Context, delta: f64) {
     let ctx = ctx.clone();
     button.connect_clicked(move |_| {
-        let mode = ctx.mode.get();
         let current = {
             let prefs = ctx.prefs.borrow();
-            match mode {
+            match ctx.mode.get() {
                 Mode::Up => prefs.up_mode_zoom_level,
                 Mode::Down => prefs.down_mode_zoom_level,
             }
         };
-        let next = (current + delta).clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
-        {
-            let mut prefs = ctx.prefs.borrow_mut();
-            match mode {
-                Mode::Up => prefs.up_mode_zoom_level = next,
-                Mode::Down => prefs.down_mode_zoom_level = next,
-            }
-        }
-        ctx.webview.set_zoom_level(next);
-        ctx.save_and_apply();
+        set_zoom(&ctx, current + delta);
     });
 }
 

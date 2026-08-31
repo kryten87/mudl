@@ -47,6 +47,8 @@ use mudl_server::version::VersionCounter;
 use crate::comments;
 use crate::find;
 use crate::geometry;
+use crate::menu;
+use crate::recent;
 use crate::sidebar;
 use crate::toggle::next_mode;
 use crate::toolbar;
@@ -71,20 +73,38 @@ const CAPTURE_SCROLL_FRACTION_JS: &str = "\
 /// One currently-open window, tracked in a process-wide `Registry` so a
 /// request to open a file already showing in one of its tabs can raise
 /// that window and select the tab instead of opening a redundant new one.
-struct OpenWindow {
+pub(crate) struct OpenWindow {
     window: gtk::ApplicationWindow,
     notebook: gtk::Notebook,
-    /// Index-aligned with `notebook`'s pages. Only ever grows by whole new
-    /// windows (Phase 10.6 tabs aren't added to a window after it's built),
-    /// so an index found here stays valid for `notebook`'s lifetime.
-    tab_paths: Rc<RefCell<Vec<PathBuf>>>,
-    /// Kept alive only to keep each tab's file watcher running (Phase
-    /// 10.8) — never read again after `build_window` populates it. Without
-    /// this, `TabSource::_watch` would drop (and its poll thread would
-    /// stop) the moment `open_files` returned, since `build_window`
-    /// previously only borrowed `tabs`; a saved edit would then never
-    /// trigger live-reload, since nothing was left polling the file.
-    _tabs: Vec<TabSource>,
+    /// Index-aligned with `notebook`'s pages: `tabs.borrow()[i]` is the
+    /// handle for `notebook`'s `i`th page. Phase 15's menu bar (one per
+    /// window, not per tab) resolves "the current tab" through this via
+    /// `notebook.current_page()`; `File > Close` (15.5) is the one thing
+    /// that removes an entry, and it removes the matching notebook page in
+    /// the same step, keeping the two in sync.
+    tabs: Rc<RefCell<Vec<TabHandle>>>,
+}
+
+/// Everything the menu bar (Phase 15.5) and per-tab signal handlers need to
+/// reach after `build_tab` returns — the webview, mode, and other
+/// once-local variables `build_tab` used to leave to go out of scope once
+/// its root widget was returned.
+pub(crate) struct TabHandle {
+    pub(crate) path: PathBuf,
+    /// Already bundles the webview, mode cell, shared preferences, the
+    /// document source, and the server address — everything a toolbar
+    /// control needs, which is also everything most menu items need.
+    pub(crate) toolbar_ctx: toolbar::Context,
+    /// Shared with `navigate_to_mode` so a menu-driven Mark Up/Mark Down
+    /// jump preserves scroll position exactly like a Space-bar toggle.
+    pub(crate) pending_scroll_fraction: Rc<Cell<f64>>,
+    pub(crate) find_bar: find::FindBar,
+    pub(crate) toolbar_widgets: toolbar::ToolbarWidgets,
+    pub(crate) sidebar_scroller: gtk::ScrolledWindow,
+    /// Kept alive only to keep this tab's file watcher running (Phase
+    /// 10.8) — dropped, and the watch stopped, when the tab closes (Phase
+    /// 15.5's `Close`) or the window does.
+    _watch: mudl_watch::WatchHandle,
 }
 
 /// Every window open in this process. With `ApplicationFlags::HANDLES_OPEN`
@@ -96,7 +116,7 @@ struct OpenWindow {
 /// by both `connect_open`'s handler and every tab's link-click handler, is
 /// enough to recognize "this file is already open" across *any* window,
 /// not just the one the request originated from.
-type Registry = Rc<RefCell<Vec<OpenWindow>>>;
+pub(crate) type Registry = Rc<RefCell<Vec<OpenWindow>>>;
 
 /// One file's server instance, started before the window exists so a
 /// failure to bind/canonicalize/read is reported before any GTK state is
@@ -167,7 +187,11 @@ pub fn run(paths: &[PathBuf]) -> Result<(), String> {
 /// everything else is grouped into a single new window with one tab per
 /// requested-but-not-yet-open file, mirroring the original "one `mudl
 /// file1 file2` invocation, one window, one tab per file" behavior.
-fn open_files(
+/// Also reused directly by the Phase 15.5 menu bar's File > Open... and
+/// Open Recent items — both just need to run this same "focus if already
+/// open, else start a tab and open a window" logic in-process, exactly
+/// like a fresh `GApplication::open` request.
+pub(crate) fn open_files(
     app: &gtk::Application,
     requested: &[PathBuf],
     registry: &Registry,
@@ -187,7 +211,10 @@ fn open_files(
     let mut tabs = Vec::with_capacity(new_paths.len());
     for path in &new_paths {
         match start_tab_source(path, &prefs.borrow()) {
-            Ok(tab) => tabs.push(tab),
+            Ok(tab) => {
+                record_recent(&tab.path);
+                tabs.push(tab);
+            }
             // Best-effort per file, same as a `mudl file1 file2` launch
             // where only one of them fails to read: the rest still open
             // rather than the whole request being abandoned. This message
@@ -211,10 +238,10 @@ fn focus_if_already_open(path: &Path, registry: &Registry) -> bool {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let focused = registry.borrow().iter().find_map(|entry| {
         let index = entry
-            .tab_paths
+            .tabs
             .borrow()
             .iter()
-            .position(|tab_path| *tab_path == canonical)?;
+            .position(|tab| tab.path == canonical)?;
         Some((entry.window.clone(), entry.notebook.clone(), index))
     });
     let Some((window, notebook, index)) = focused else {
@@ -240,6 +267,25 @@ fn preferences_path() -> PathBuf {
 fn geometry_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".config/mudl/window-geometry")
+}
+
+/// `~/.config/mudl/recent-files` — see `crate::recent`'s doc comment for
+/// why this is a separate file from `preferences_path()`'s.
+pub(crate) fn recent_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".config/mudl/recent-files")
+}
+
+/// Records `path` as most-recently-opened (Phase 15.1), re-reading the
+/// list fresh first so a concurrent window's own record isn't clobbered.
+/// Save errors are swallowed — there's no good place to surface them from
+/// an open action, and the file just having opened is the important part.
+pub(crate) fn record_recent(path: &Path) {
+    const MAX_RECENT: usize = 10;
+    let recent_path = recent_path();
+    let existing = recent::load(&mudl_config::RealFileSystem, &recent_path);
+    let updated = recent::record(&existing, path, MAX_RECENT);
+    let _ = recent::save(&mudl_config::RealFileSystem, &recent_path, &updated);
 }
 
 fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, String> {
@@ -269,7 +315,7 @@ fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, Strin
 
 fn build_window(
     app: &gtk::Application,
-    tabs: Vec<TabSource>,
+    sources: Vec<TabSource>,
     prefs: Rc<RefCell<Preferences>>,
     prefs_path: &Path,
     registry: &Registry,
@@ -278,8 +324,9 @@ fn build_window(
     window.set_title("mudl");
 
     // The window's geometry is keyed by its first tab's path (Phase
-    // 10.7) — `tabs` is never empty (`run` errors first if `paths` was).
-    let geometry_key = tabs[0].path.clone();
+    // 10.7) — `sources` is never empty (`run` errors first if `paths`
+    // was).
+    let geometry_key = sources[0].path.clone();
     let geometry_path = geometry_path();
     match geometry::load(&mudl_config::RealFileSystem, &geometry_path, &geometry_key) {
         Some(saved) => {
@@ -294,24 +341,40 @@ fn build_window(
     connect_geometry_save(&window, geometry_path, geometry_key);
 
     let notebook = gtk::Notebook::new();
-    for tab in &tabs {
-        let tab_widget = build_tab(tab, Rc::clone(&prefs), prefs_path, registry);
-        let label = gtk::Label::new(Some(&tab.title));
+    let mut tabs = Vec::with_capacity(sources.len());
+    for source in sources {
+        let title = source.title.clone();
+        let (tab_widget, handle) = build_tab(source, Rc::clone(&prefs), prefs_path, registry);
+        let label = gtk::Label::new(Some(&title));
         notebook.append_page(&tab_widget, Some(&label));
+        tabs.push(handle);
     }
+    let tabs = Rc::new(RefCell::new(tabs));
 
-    window.add(&notebook);
+    let menu_prefs_path = prefs_path.to_path_buf();
+    let (menu_bar, accel_group) = menu::build(&menu::Context {
+        app: app.clone(),
+        window: window.clone(),
+        notebook: notebook.clone(),
+        tabs: Rc::clone(&tabs),
+        registry: Rc::clone(registry),
+        prefs: Rc::clone(&prefs),
+        prefs_path: menu_prefs_path,
+        recent_path: recent_path(),
+    });
+    window.add_accel_group(&accel_group);
+
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.pack_start(&menu_bar, false, false, 0);
+    root.pack_start(&notebook, true, true, 0);
+    window.add(&root);
     window.show_all();
 
-    let tab_paths = Rc::new(RefCell::new(
-        tabs.iter().map(|tab| tab.path.clone()).collect(),
-    ));
-    connect_registry_cleanup(&window, Rc::clone(registry), Rc::clone(&tab_paths));
+    connect_registry_cleanup(&window, Rc::clone(registry), Rc::clone(&tabs));
     registry.borrow_mut().push(OpenWindow {
         window,
         notebook,
-        tab_paths,
-        _tabs: tabs,
+        tabs,
     });
 }
 
@@ -344,33 +407,41 @@ fn connect_geometry_save(
 
 /// On close, drops this window's entry from `registry` so a later request
 /// for one of its files opens a fresh window instead of trying to raise a
-/// window that no longer exists. `tab_paths` — the same `Rc` pushed onto
+/// window that no longer exists. `tabs` — the same `Rc` pushed onto
 /// `registry` for this window — identifies which entry is this window's,
 /// since GTK widgets don't implement equality.
 fn connect_registry_cleanup(
     window: &gtk::ApplicationWindow,
     registry: Registry,
-    tab_paths: Rc<RefCell<Vec<PathBuf>>>,
+    tabs: Rc<RefCell<Vec<TabHandle>>>,
 ) {
     window.connect_delete_event(move |_window, _event| {
         registry
             .borrow_mut()
-            .retain(|entry| !Rc::ptr_eq(&entry.tab_paths, &tab_paths));
+            .retain(|entry| !Rc::ptr_eq(&entry.tabs, &tabs));
         gtk::glib::Propagation::Proceed
     });
 }
 
 /// Builds one tab's entire content: toolbar, outline sidebar, WebView, and
-/// the find-bar overlay, wired together and pointed at `tab`'s server
-/// instance. Returns the tab's root widget, ready to hand to
-/// `gtk::Notebook::append_page`.
+/// the find-bar overlay, wired together and pointed at `source`'s server
+/// instance. Returns the tab's root widget and the handle (Phase 15.4) the
+/// window-level menu bar and registry need to reach back into it.
 fn build_tab(
-    tab: &TabSource,
+    source: TabSource,
     prefs: Rc<RefCell<Preferences>>,
     prefs_path: &Path,
     registry: &Registry,
-) -> gtk::Box {
-    let addr = tab.addr;
+) -> (gtk::Box, TabHandle) {
+    let TabSource {
+        path,
+        title: _,
+        addr,
+        markdown,
+        document,
+        _watch: watch,
+    } = source;
+
     let webview = webkit2gtk::WebView::new();
     webview.load_uri(&format!("http://{addr}/"));
 
@@ -408,6 +479,10 @@ fn build_tab(
     let sidebar_scroller =
         gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
     sidebar_scroller.set_size_request(220, -1);
+    // Phase 15.5's "Hide Sidebar" menu item toggles this same visibility
+    // and writes it back to `sidebar_enabled` — this is just the initial
+    // state a freshly-opened tab starts from.
+    sidebar_scroller.set_visible(prefs.borrow().sidebar_enabled);
     match sidebar_pane {
         mudl_config::SidebarPane::Changes => {
             sidebar_scroller.add(changes_list.as_ref().unwrap());
@@ -428,7 +503,7 @@ fn build_tab(
 
             let comments_ctx = comments::Context {
                 list_view,
-                path: tab.path.clone(),
+                path: path.clone(),
             };
             let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
             column.pack_start(&list_scroller, true, true, 0);
@@ -436,7 +511,7 @@ fn build_tab(
             sidebar_scroller.add(&column);
         }
         mudl_config::SidebarPane::Outline => {
-            let headings = extract_headings(&tab.markdown);
+            let headings = extract_headings(&markdown);
             let outline_tree = outline::build_tree(&headings);
             let outline_view = sidebar::build_outline_tree_view(&outline_tree);
             connect_sidebar_navigation(&outline_view, &webview, Rc::clone(&mode));
@@ -453,11 +528,11 @@ fn build_tab(
         mode: Rc::clone(&mode),
         prefs,
         prefs_path: prefs_path.to_path_buf(),
-        document: Arc::clone(&tab.document),
+        document,
         addr,
         changes_list,
     };
-    let toolbar_widget = toolbar::build(&toolbar_ctx);
+    let (toolbar_widget, toolbar_widgets) = toolbar::build(&toolbar_ctx);
 
     let (overlay, find_bar) = find::build(&paned, &webview);
 
@@ -465,26 +540,24 @@ fn build_tab(
     vbox.pack_start(&toolbar_widget, false, false, 0);
     vbox.pack_start(&overlay, true, true, 0);
 
-    connect_find_shortcut(&vbox, find_bar);
-    connect_mode_toggle(&vbox, &webview, addr, mode, pending_scroll_fraction);
+    connect_mode_toggle(
+        &vbox,
+        &webview,
+        addr,
+        Rc::clone(&mode),
+        Rc::clone(&pending_scroll_fraction),
+    );
 
-    vbox
-}
-
-/// Ctrl+F shows and focuses the find bar; WebKit2GTK's own
-/// `WebKitFindController` handles everything else (Phase 10.5). Connected
-/// on the tab's own container (see the module doc comment on per-tab
-/// shortcut scoping), not the shared window.
-fn connect_find_shortcut(tab_container: &gtk::Box, find_bar: find::FindBar) {
-    tab_container.connect_key_press_event(move |_widget, event| {
-        let ctrl_f = event.state().contains(gtk::gdk::ModifierType::CONTROL_MASK)
-            && event.keyval() == gtk::gdk::keys::constants::f;
-        if ctrl_f {
-            find_bar.show();
-            return gtk::glib::Propagation::Stop;
-        }
-        gtk::glib::Propagation::Proceed
-    });
+    let handle = TabHandle {
+        path,
+        toolbar_ctx,
+        pending_scroll_fraction,
+        find_bar,
+        toolbar_widgets,
+        sidebar_scroller,
+        _watch: watch,
+    };
+    (vbox, handle)
 }
 
 /// After every finished page load, scrolls to whatever fraction was
@@ -625,34 +698,49 @@ fn connect_mode_toggle(
             return gtk::glib::Propagation::Proceed;
         }
 
-        let webview_for_nav = webview.clone();
-        let mode = Rc::clone(&mode);
-        let pending_scroll_fraction = Rc::clone(&pending_scroll_fraction);
-        webview.evaluate_javascript(
-            CAPTURE_SCROLL_FRACTION_JS,
-            None,
-            None,
-            None::<&gtk::gio::Cancellable>,
-            move |result| {
-                let fraction = result
-                    .ok()
-                    .filter(|value| value.is_number())
-                    .map(|value| value.to_double())
-                    .unwrap_or(0.0);
-                pending_scroll_fraction.set(fraction);
-
-                let next = next_mode(mode.get());
-                mode.set(next);
-                let path = match next {
-                    Mode::Up => "/",
-                    Mode::Down => "/?mode=down",
-                };
-                webview_for_nav.load_uri(&format!("http://{addr}{path}"));
-            },
-        );
+        let target = next_mode(mode.get());
+        navigate_to_mode(&webview, addr, &mode, &pending_scroll_fraction, target);
 
         gtk::glib::Propagation::Stop
     });
+}
+
+/// Captures the current scroll fraction, sets `mode` to `target`, and
+/// re-navigates the WebView there (Phase 15.4: extracted from
+/// `connect_mode_toggle`'s closure body so both the Space-bar toggle
+/// — `target = next_mode(mode.get())` — and the Phase 15.5 menu's Mark
+/// Up/Mark Down items — a fixed `target` — share one implementation).
+pub(crate) fn navigate_to_mode(
+    webview: &webkit2gtk::WebView,
+    addr: SocketAddr,
+    mode: &Rc<Cell<Mode>>,
+    pending_scroll_fraction: &Rc<Cell<f64>>,
+    target: Mode,
+) {
+    let webview_for_nav = webview.clone();
+    let mode = Rc::clone(mode);
+    let pending_scroll_fraction = Rc::clone(pending_scroll_fraction);
+    webview.evaluate_javascript(
+        CAPTURE_SCROLL_FRACTION_JS,
+        None,
+        None,
+        None::<&gtk::gio::Cancellable>,
+        move |result| {
+            let fraction = result
+                .ok()
+                .filter(|value| value.is_number())
+                .map(|value| value.to_double())
+                .unwrap_or(0.0);
+            pending_scroll_fraction.set(fraction);
+
+            mode.set(target);
+            let path = match target {
+                Mode::Up => "/",
+                Mode::Down => "/?mode=down",
+            };
+            webview_for_nav.load_uri(&format!("http://{addr}{path}"));
+        },
+    );
 }
 
 /// Row activation (double-click or Enter) in the outline sidebar: reads
