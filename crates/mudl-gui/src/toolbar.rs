@@ -1,10 +1,10 @@
-//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): word-wrap/
-//! line-numbers toggle buttons and the "Changes since…" popover. Zoom,
-//! Readable Column, and the theme picker moved to the Phase 15 menu bar's
+//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): now just the
+//! "Changes since…" popover. Zoom, Readable Column, Line Numbers, Word
+//! Wrap, and the theme picker all moved to the Phase 15 menu bar's
 //! View/Theme menus — the toolbar controls for them were redundant with
 //! the menu items and have been removed; `set_zoom`/`step_zoom`/
-//! `set_readable_column`/`set_theme` below are what the menu calls
-//! directly.
+//! `set_readable_column`/`set_line_numbers`/`set_word_wrap`/`set_theme`
+//! below are what the menu calls directly.
 //!
 //! Every control keeps three things in lockstep: the live WebView (via
 //! `WebView::set_zoom_level` for zoom, or a small injected script for the
@@ -73,18 +73,6 @@ impl Context {
 /// Builds the toolbar widget and wires every control's signal handler.
 pub fn build(ctx: &Context) -> gtk::Box {
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-
-    let line_numbers = gtk::ToggleButton::with_label("Line #s");
-    let word_wrap = gtk::ToggleButton::with_label("Wrap");
-    {
-        let prefs = ctx.prefs.borrow();
-        line_numbers.set_active(prefs.down_mode_show_line_numbers);
-        word_wrap.set_active(prefs.down_mode_wrap_lines);
-    }
-    connect_line_numbers_toggle(&line_numbers, ctx);
-    connect_word_wrap_toggle(&word_wrap, ctx);
-    toolbar.pack_start(&line_numbers, false, false, 4);
-    toolbar.pack_start(&word_wrap, false, false, 0);
 
     let changes_button = gtk::MenuButton::new();
     changes_button.set_label("Changes since…");
@@ -193,24 +181,24 @@ pub fn step_zoom(ctx: &Context, delta: f64) {
     set_zoom(ctx, current + delta);
 }
 
-fn connect_line_numbers_toggle(button: &gtk::ToggleButton, ctx: &Context) {
-    let ctx = ctx.clone();
-    button.connect_toggled(move |button| {
-        let active = button.is_active();
-        ctx.prefs.borrow_mut().down_mode_show_line_numbers = active;
-        toggle_root_class(&ctx.webview, "has-line-numbers", active);
-        ctx.save_and_apply();
-    });
+/// Sets whether Down mode's raw-source view shows gutter line numbers, and
+/// applies it live. Used by the menu's "Line Numbers" item (Phase 15) —
+/// there's no toolbar button for this anymore. Only visible in Down mode
+/// (Space bar, or View > Mark Down); has no visible effect in Up mode.
+pub fn set_line_numbers(ctx: &Context, active: bool) {
+    ctx.prefs.borrow_mut().down_mode_show_line_numbers = active;
+    toggle_root_class(&ctx.webview, "has-line-numbers", active);
+    ctx.save_and_apply();
 }
 
-fn connect_word_wrap_toggle(button: &gtk::ToggleButton, ctx: &Context) {
-    let ctx = ctx.clone();
-    button.connect_toggled(move |button| {
-        let active = button.is_active();
-        ctx.prefs.borrow_mut().down_mode_wrap_lines = active;
-        toggle_root_class(&ctx.webview, "has-word-wrap", active);
-        ctx.save_and_apply();
-    });
+/// Sets whether Down mode's raw-source view wraps long lines, and applies
+/// it live. Used by the menu's "Word Wrap" item (Phase 15) — there's no
+/// toolbar button for this anymore. Only visible in Down mode; has no
+/// visible effect in Up mode.
+pub fn set_word_wrap(ctx: &Context, active: bool) {
+    ctx.prefs.borrow_mut().down_mode_wrap_lines = active;
+    toggle_root_class(&ctx.webview, "has-word-wrap", active);
+    ctx.save_and_apply();
 }
 
 /// Sets the Readable Column preference and applies it live to `ctx`'s

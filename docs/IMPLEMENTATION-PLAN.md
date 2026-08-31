@@ -1121,6 +1121,22 @@ the menu's shape still matches `docs/MENUS.md`:
     open and track a Space-bar toggle; the three disabled items are
     visibly disabled, not just missing.
 
+15.8 **[P]** Follow-up: the toolbar's remaining "Line #s"/"Wrap" buttons
+    (Down-mode-only gutter line numbers / long-line wrapping — easy to
+    mistake for broken, since they have no visible effect while looking
+    at Up mode) are removed the same way 15.3 removed Zoom/Readable
+    Column/Theme, and added to the View menu instead, right after
+    Readable Column (`docs/MENUS.md` gains "Line Numbers"/"Word Wrap",
+    flagged as mudl-only additions with no `mud` equivalent).
+    `toolbar::set_line_numbers`/`set_word_wrap(ctx: &Context, active:
+    bool)` are extracted the same way `set_readable_column` was;
+    `connect_view_menu_show`'s growing checkable-widget list is bundled
+    into a `ViewMenuCheckables` struct to stay under clippy's
+    too-many-arguments threshold, and its resync reads all three
+    Down-mode/Readable-Column flags out of one `prefs.borrow()` block
+    before calling any `set_active` (same `BorrowMutError` hazard 15.5's
+    original Readable Column resync already had to avoid).
+
 
 ## Appendix A — Step summary by parallelizability
 

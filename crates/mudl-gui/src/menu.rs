@@ -534,6 +534,17 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
     connect_readable_column(&readable_column, ctx);
     menu.append(&readable_column);
 
+    // Not part of `docs/MENUS.md` (mud's own menu has no equivalent) —
+    // added here because these only affect Down mode's raw-source view
+    // and were easy to miss as toolbar buttons that do nothing in Up mode.
+    let line_numbers = gtk::CheckMenuItem::with_label("Line Numbers");
+    connect_line_numbers(&line_numbers, ctx);
+    menu.append(&line_numbers);
+
+    let word_wrap = gtk::CheckMenuItem::with_label("Word Wrap");
+    connect_word_wrap(&word_wrap, ctx);
+    menu.append(&word_wrap);
+
     menu.append(&gtk::SeparatorMenuItem::new());
 
     let actual_size = gtk::MenuItem::with_label("Actual Size");
@@ -554,10 +565,14 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
     connect_view_menu_show(
         &menu,
         ctx,
-        hide_sidebar,
-        mark_up,
-        mark_down,
-        readable_column,
+        ViewMenuCheckables {
+            hide_sidebar,
+            mark_up,
+            mark_down,
+            readable_column,
+            line_numbers,
+            word_wrap,
+        },
     );
 
     let view = gtk::MenuItem::with_label("View");
@@ -565,31 +580,56 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
     view
 }
 
-/// Resyncs the checkable View items from the current tab's true state
-/// every time the View menu is opened (see the module doc comment on why
-/// this doesn't need continuous bidirectional signal wiring).
-fn connect_view_menu_show(
-    menu: &gtk::Menu,
-    ctx: &Context,
+/// The View menu's checkable items, resynced together from the current
+/// tab's true state every time the menu is opened (`connect_view_menu_show`)
+/// — bundled into one struct so that function stays under clippy's
+/// too-many-arguments threshold.
+struct ViewMenuCheckables {
     hide_sidebar: gtk::CheckMenuItem,
     mark_up: gtk::RadioMenuItem,
     mark_down: gtk::RadioMenuItem,
     readable_column: gtk::CheckMenuItem,
-) {
+    line_numbers: gtk::CheckMenuItem,
+    word_wrap: gtk::CheckMenuItem,
+}
+
+/// Resyncs the checkable View items from the current tab's true state
+/// every time the View menu is opened (see the module doc comment on why
+/// this doesn't need continuous bidirectional signal wiring).
+fn connect_view_menu_show(menu: &gtk::Menu, ctx: &Context, checkables: ViewMenuCheckables) {
     let tabs = Rc::clone(&ctx.tabs);
     let notebook = ctx.notebook.clone();
+    let ViewMenuCheckables {
+        hide_sidebar,
+        mark_up,
+        mark_down,
+        readable_column,
+        line_numbers,
+        word_wrap,
+    } = checkables;
     menu.connect_show(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
             hide_sidebar.set_active(!tab.sidebar_scroller.is_visible());
-            // Read the flag into a local first: `set_active` below can
-            // synchronously fire `connect_readable_column`'s handler,
-            // which does `ctx.prefs.borrow_mut()` — holding the `Ref`
-            // from `.borrow()` alive across that call (Rust extends a
-            // temporary's lifetime to the end of its statement) would
-            // panic with a `BorrowMutError` on this same `RefCell`.
-            let readable_column_active = tab.toolbar_ctx.prefs.borrow().ui_show_readable_column;
+            let mode = tab.toolbar_ctx.mode.get();
+            // Read every flag into a local first, all in one block: each
+            // `set_active` below can synchronously fire its own toggled
+            // handler, which borrows `ctx.prefs` mutably — holding the
+            // `Ref` from `.borrow()` alive across any of those calls
+            // (Rust extends a temporary's lifetime to the end of its
+            // statement) would panic with a `BorrowMutError` on this same
+            // `RefCell`.
+            let (readable_column_active, line_numbers_active, word_wrap_active) = {
+                let prefs = tab.toolbar_ctx.prefs.borrow();
+                (
+                    prefs.ui_show_readable_column,
+                    prefs.down_mode_show_line_numbers,
+                    prefs.down_mode_wrap_lines,
+                )
+            };
             readable_column.set_active(readable_column_active);
-            match tab.toolbar_ctx.mode.get() {
+            line_numbers.set_active(line_numbers_active);
+            word_wrap.set_active(word_wrap_active);
+            match mode {
                 Mode::Up => mark_up.set_active(true),
                 Mode::Down => mark_down.set_active(true),
             }
@@ -619,6 +659,28 @@ fn connect_readable_column(check: &gtk::CheckMenuItem, ctx: &Context) {
         let active = check.is_active();
         with_current_tab(&tabs, &notebook, |tab| {
             toolbar::set_readable_column(&tab.toolbar_ctx, active);
+        });
+    });
+}
+
+fn connect_line_numbers(check: &gtk::CheckMenuItem, ctx: &Context) {
+    let tabs = Rc::clone(&ctx.tabs);
+    let notebook = ctx.notebook.clone();
+    check.connect_toggled(move |check| {
+        let active = check.is_active();
+        with_current_tab(&tabs, &notebook, |tab| {
+            toolbar::set_line_numbers(&tab.toolbar_ctx, active);
+        });
+    });
+}
+
+fn connect_word_wrap(check: &gtk::CheckMenuItem, ctx: &Context) {
+    let tabs = Rc::clone(&ctx.tabs);
+    let notebook = ctx.notebook.clone();
+    check.connect_toggled(move |check| {
+        let active = check.is_active();
+        with_current_tab(&tabs, &notebook, |tab| {
+            toolbar::set_word_wrap(&tab.toolbar_ctx, active);
         });
     });
 }

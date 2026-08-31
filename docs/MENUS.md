@@ -35,6 +35,8 @@
 - Mark Down
 - --- horizontal separator
 - Readable Column <Ctrl-Shift-R>
+- Line Numbers (mudl addition, no `mud` equivalent — moved here from a toolbar button; Down mode only)
+- Word Wrap (mudl addition, no `mud` equivalent — moved here from a toolbar button; Down mode only)
 - --- horizontal separator
 - Actual Size <Ctrl-0>
 - Zoom In <Ctrl-+>
