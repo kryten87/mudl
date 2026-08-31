@@ -16,55 +16,58 @@
 
 /* -- Line container ------------------------------------------------------- */
 
-.down-lines {
+/* `mudl_core::render::render_down` emits one `<div class="line"
+   data-line="N">` per source line (a deliberate simplification over
+   `mud`'s own `.dl`/`.ln`/`.lc` split-container line structure — see
+   `docs/IMPLEMENTATION-PLAN.md` Phase 2.4's "actual numbering is
+   CSS-driven" note) — line numbers below are generated from a CSS
+   counter on `.line` itself, not a separate sibling element. */
+
+.down-mode-output {
+  counter-reset: line;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.875em;
   line-height: 1.6;
 }
 
-
-/* Each line: flex row.  Default stretch alignment ensures .ln
-   background covers the full row height when .lc wraps. */
-
-.dl {
-  display: flex;
+.line {
+  position: relative;
+  padding: 0 1em 0 4.5em;
 }
 
-.down-lines > .dl:first-child > *,
-.down-lines > .dc-scroll:first-child > .dl:first-child > * {
+.line:first-child {
   padding-top: 2rem;
 }
 
-.down-lines > .dl:last-child > *,
-.down-lines > .dc-scroll:last-child > .dl:last-child > * {
+.line:last-child {
   padding-bottom: 6rem; /* Space for floating bars beneath */
 }
 
 
 /* -- Line numbers --------------------------------------------------------- */
 
-.ln {
-  position: sticky;
+.line::before {
+  counter-increment: line;
+  content: counter(line);
+  position: absolute;
   left: 0;
-  z-index: 2;
-  flex: 0 0 4em;
+  top: 0;
+  width: 3.5em;
   padding-right: 1em;
   text-align: right;
   font-size: 0.85em;
   font-weight: 300;
   user-select: none;
   -webkit-user-select: none;
-  white-space: nowrap;
-  background: color-mix(in srgb, var(--code-bg), var(--bg-color));
   color: color-mix(in srgb, var(--blockquote-color), var(--bg-color));
-  line-height: 1.7;
 }
 
-html:not(.has-line-numbers) .ln {
-  visibility: hidden;
-  flex-basis: 0;
-  width: 0;
-  padding: 0;
+html:not(.has-line-numbers) .line {
+  padding-left: 1em;
+}
+
+html:not(.has-line-numbers) .line::before {
+  content: none;
 }
 
 
