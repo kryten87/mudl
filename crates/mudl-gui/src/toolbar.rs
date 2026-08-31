@@ -1,5 +1,9 @@
-//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): theme picker,
-//! zoom in/out, and word-wrap/line-numbers/readable-column toggle buttons.
+//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): theme picker and
+//! word-wrap/line-numbers toggle buttons. Zoom and Readable Column moved to
+//! the Phase 15 menu bar's View menu (`Actual Size`/`Zoom In`/`Zoom Out`/
+//! `Readable Column`) — the toolbar buttons for them were redundant with
+//! the menu items and have been removed; `set_zoom`/`step_zoom`/
+//! `set_readable_column` below are what the menu calls directly.
 //!
 //! Every control keeps three things in lockstep: the live WebView (via
 //! `WebView::set_zoom_level` for zoom, or a small injected script for the
@@ -25,7 +29,9 @@ use mudl_server::server::DocumentSource;
 use crate::changes;
 use crate::config;
 
-const ZOOM_STEP: f64 = 0.1;
+/// The step `step_zoom` moves by — reused by the Phase 15 menu's Zoom
+/// In/Out items.
+pub const ZOOM_STEP: f64 = 0.1;
 const ZOOM_RANGE: RangeInclusive<f64> = 0.1..=10.0;
 
 /// Everything a toolbar control needs to read current state and apply a
@@ -64,14 +70,11 @@ impl Context {
 }
 
 /// The subset of the toolbar's controls the menu bar (Phase 15.5) drives
-/// directly instead of duplicating their logic — e.g. the menu's Zoom In
-/// item calls `zoom_in.clicked()` rather than reimplementing
-/// `connect_zoom_button`'s body.
+/// directly instead of duplicating their logic — the Theme submenu calls
+/// `theme_combo.set_active_id(...)` rather than reimplementing
+/// `build_theme_combo`'s apply/save/reload logic.
 #[derive(Clone)]
 pub struct ToolbarWidgets {
-    pub zoom_in: gtk::Button,
-    pub zoom_out: gtk::Button,
-    pub readable_column: gtk::ToggleButton,
     pub theme_combo: gtk::ComboBoxText,
 }
 
@@ -82,40 +85,24 @@ pub fn build(ctx: &Context) -> (gtk::Box, ToolbarWidgets) {
     let theme_combo = build_theme_combo(ctx);
     toolbar.pack_start(&theme_combo, false, false, 4);
 
-    let zoom_out = gtk::Button::with_label("-");
-    let zoom_in = gtk::Button::with_label("+");
-    connect_zoom_button(&zoom_out, ctx, -ZOOM_STEP);
-    connect_zoom_button(&zoom_in, ctx, ZOOM_STEP);
-    toolbar.pack_start(&zoom_out, false, false, 0);
-    toolbar.pack_start(&zoom_in, false, false, 4);
-
     let line_numbers = gtk::ToggleButton::with_label("Line #s");
     let word_wrap = gtk::ToggleButton::with_label("Wrap");
-    let readable_column = gtk::ToggleButton::with_label("Readable");
     {
         let prefs = ctx.prefs.borrow();
         line_numbers.set_active(prefs.down_mode_show_line_numbers);
         word_wrap.set_active(prefs.down_mode_wrap_lines);
-        readable_column.set_active(prefs.ui_show_readable_column);
     }
     connect_line_numbers_toggle(&line_numbers, ctx);
     connect_word_wrap_toggle(&word_wrap, ctx);
-    connect_readable_column_toggle(&readable_column, ctx);
     toolbar.pack_start(&line_numbers, false, false, 4);
     toolbar.pack_start(&word_wrap, false, false, 0);
-    toolbar.pack_start(&readable_column, false, false, 0);
 
     let changes_button = gtk::MenuButton::new();
     changes_button.set_label("Changes since…");
     connect_changes_button(&changes_button, ctx);
     toolbar.pack_start(&changes_button, false, false, 4);
 
-    let widgets = ToolbarWidgets {
-        zoom_in,
-        zoom_out,
-        readable_column,
-        theme_combo,
-    };
+    let widgets = ToolbarWidgets { theme_combo };
     (toolbar, widgets)
 }
 
@@ -202,10 +189,9 @@ fn build_theme_combo(ctx: &Context) -> gtk::ComboBoxText {
 }
 
 /// Sets the current mode's zoom level to `value` (clamped to
-/// `ZOOM_RANGE`), applies it to the live `WebView`, and persists it.
-/// Extracted (Phase 15.3) so both `connect_zoom_button`'s delta-based
-/// buttons and the menu's absolute-value "Actual Size" item share one
-/// implementation.
+/// `ZOOM_RANGE`), applies it to the live `WebView`, and persists it. Used
+/// by the menu's absolute-value "Actual Size" item and by `step_zoom`
+/// below.
 pub fn set_zoom(ctx: &Context, value: f64) {
     let mode = ctx.mode.get();
     let clamped = value.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
@@ -220,18 +206,18 @@ pub fn set_zoom(ctx: &Context, value: f64) {
     ctx.save_and_apply();
 }
 
-fn connect_zoom_button(button: &gtk::Button, ctx: &Context, delta: f64) {
-    let ctx = ctx.clone();
-    button.connect_clicked(move |_| {
-        let current = {
-            let prefs = ctx.prefs.borrow();
-            match ctx.mode.get() {
-                Mode::Up => prefs.up_mode_zoom_level,
-                Mode::Down => prefs.down_mode_zoom_level,
-            }
-        };
-        set_zoom(&ctx, current + delta);
-    });
+/// Moves the current mode's zoom level by `delta` (positive to zoom in,
+/// negative to zoom out) via `set_zoom`. Used by the menu's Zoom In/Out
+/// items (Phase 15.5) — there's no toolbar button for this anymore.
+pub fn step_zoom(ctx: &Context, delta: f64) {
+    let current = {
+        let prefs = ctx.prefs.borrow();
+        match ctx.mode.get() {
+            Mode::Up => prefs.up_mode_zoom_level,
+            Mode::Down => prefs.down_mode_zoom_level,
+        }
+    };
+    set_zoom(ctx, current + delta);
 }
 
 fn connect_line_numbers_toggle(button: &gtk::ToggleButton, ctx: &Context) {
@@ -254,14 +240,13 @@ fn connect_word_wrap_toggle(button: &gtk::ToggleButton, ctx: &Context) {
     });
 }
 
-fn connect_readable_column_toggle(button: &gtk::ToggleButton, ctx: &Context) {
-    let ctx = ctx.clone();
-    button.connect_toggled(move |button| {
-        let active = button.is_active();
-        ctx.prefs.borrow_mut().ui_show_readable_column = active;
-        toggle_root_class(&ctx.webview, "is-readable-column", active);
-        ctx.save_and_apply();
-    });
+/// Sets the Readable Column preference and applies it live to `ctx`'s
+/// `WebView`. Used by the menu's "Readable Column" item (Phase 15.5) —
+/// there's no toolbar button for this anymore.
+pub fn set_readable_column(ctx: &Context, active: bool) {
+    ctx.prefs.borrow_mut().ui_show_readable_column = active;
+    toggle_root_class(&ctx.webview, "is-readable-column", active);
+    ctx.save_and_apply();
 }
 
 /// Adds or removes `class` on `<html>` in the live page — the `mud`

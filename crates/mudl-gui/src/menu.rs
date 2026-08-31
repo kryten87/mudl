@@ -581,7 +581,7 @@ fn connect_view_menu_show(
     menu.connect_show(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
             hide_sidebar.set_active(!tab.sidebar_scroller.is_visible());
-            readable_column.set_active(tab.toolbar_widgets.readable_column.is_active());
+            readable_column.set_active(tab.toolbar_ctx.prefs.borrow().ui_show_readable_column);
             match tab.toolbar_ctx.mode.get() {
                 Mode::Up => mark_up.set_active(true),
                 Mode::Down => mark_down.set_active(true),
@@ -605,17 +605,13 @@ fn connect_hide_sidebar(check: &gtk::CheckMenuItem, ctx: &Context) {
     });
 }
 
-/// Drives the current tab's existing `readable_column` toolbar button
-/// rather than reimplementing `connect_readable_column_toggle`'s logic.
 fn connect_readable_column(check: &gtk::CheckMenuItem, ctx: &Context) {
     let tabs = Rc::clone(&ctx.tabs);
     let notebook = ctx.notebook.clone();
     check.connect_toggled(move |check| {
+        let active = check.is_active();
         with_current_tab(&tabs, &notebook, |tab| {
-            let button = &tab.toolbar_widgets.readable_column;
-            if button.is_active() != check.is_active() {
-                button.set_active(check.is_active());
-            }
+            toolbar::set_readable_column(&tab.toolbar_ctx, active);
         });
     });
 }
@@ -654,7 +650,7 @@ fn connect_zoom_in(item: &gtk::MenuItem, ctx: &Context) {
     let notebook = ctx.notebook.clone();
     item.connect_activate(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
-            tab.toolbar_widgets.zoom_in.clicked()
+            toolbar::step_zoom(&tab.toolbar_ctx, toolbar::ZOOM_STEP);
         });
     });
 }
@@ -664,7 +660,7 @@ fn connect_zoom_out(item: &gtk::MenuItem, ctx: &Context) {
     let notebook = ctx.notebook.clone();
     item.connect_activate(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
-            tab.toolbar_widgets.zoom_out.clicked()
+            toolbar::step_zoom(&tab.toolbar_ctx, -toolbar::ZOOM_STEP);
         });
     });
 }
