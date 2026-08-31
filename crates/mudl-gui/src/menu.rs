@@ -581,7 +581,14 @@ fn connect_view_menu_show(
     menu.connect_show(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
             hide_sidebar.set_active(!tab.sidebar_scroller.is_visible());
-            readable_column.set_active(tab.toolbar_ctx.prefs.borrow().ui_show_readable_column);
+            // Read the flag into a local first: `set_active` below can
+            // synchronously fire `connect_readable_column`'s handler,
+            // which does `ctx.prefs.borrow_mut()` — holding the `Ref`
+            // from `.borrow()` alive across that call (Rust extends a
+            // temporary's lifetime to the end of its statement) would
+            // panic with a `BorrowMutError` on this same `RefCell`.
+            let readable_column_active = tab.toolbar_ctx.prefs.borrow().ui_show_readable_column;
+            readable_column.set_active(readable_column_active);
             match tab.toolbar_ctx.mode.get() {
                 Mode::Up => mark_up.set_active(true),
                 Mode::Down => mark_down.set_active(true),
