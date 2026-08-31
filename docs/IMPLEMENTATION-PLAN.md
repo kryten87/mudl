@@ -1045,30 +1045,29 @@ the menu's shape still matches `docs/MENUS.md`:
     instead of only closing over it locally — lets the menu's Find
     Next/Previous items and the find bar's own ▲/▼ buttons share one path.
 
-15.3 **[P]** The toolbar's Zoom In/Out and Readable Column buttons are
-    redundant with the menu's own View items (below) and are removed;
-    `toolbar::build` returns `(gtk::Box, ToolbarWidgets)`
-    (`ToolbarWidgets { theme_combo }`, now just the one widget the menu
-    still drives) instead of just the root box. `toolbar::set_zoom(ctx:
-    &Context, value: f64)` and `toolbar::step_zoom(ctx: &Context, delta:
-    f64)` (delta-based, calling `set_zoom`) and
-    `toolbar::set_readable_column(ctx: &Context, active: bool)` are `pub`
-    functions the menu calls directly, extracted from the old zoom-button
-    and readable-column-button closures.
+15.3 **[P]** The toolbar's Zoom In/Out, Readable Column, and theme-picker
+    controls are redundant with the menu's own View/Theme items (below)
+    and are removed; `toolbar::build` goes back to returning just
+    `gtk::Box` (no widgets left for the menu to drive directly).
+    `toolbar::set_zoom(ctx: &Context, value: f64)`,
+    `toolbar::step_zoom(ctx: &Context, delta: f64)` (delta-based, calling
+    `set_zoom`), `toolbar::set_readable_column(ctx: &Context, active:
+    bool)`, and `toolbar::set_theme(ctx: &Context, theme: Theme)` are
+    `pub` functions the menu calls directly, extracted from the old
+    zoom-button, readable-column-button, and theme-combo closures.
 
 15.4 **[S, depends on 15.2–15.3]** `window.rs`: introduce `TabHandle`
-    (path, webview, `toolbar::Context`, `FindBar`, the toolbar's
-    `theme_combo` widget, the sidebar's `ScrolledWindow`, and a Mark
-    Up/Mark Down radio-item pair kept in sync with `mode`), returned from
-    `build_tab` alongside its root widget. `OpenWindow.tab_paths:
-    Vec<PathBuf>` becomes `tabs: Rc<RefCell<Vec<TabHandle>>>`;
-    `focus_if_already_open` and `connect_registry_cleanup` are updated
-    mechanically to read/compare through it instead. Extract
-    `navigate_to_mode(webview, addr, mode, pending_scroll_fraction,
-    target: Mode)` from `connect_mode_toggle`'s closure body
-    (capture-scroll-then-navigate to a specific mode, not a flip); the
-    Space-bar handler calls it with `next_mode(mode.get())`, the menu's
-    Mark Up/Mark Down items call it with a fixed target. Remove
+    (path, webview, `toolbar::Context`, `FindBar`, the sidebar's
+    `ScrolledWindow`, and a Mark Up/Mark Down radio-item pair kept in sync
+    with `mode`), returned from `build_tab` alongside its root widget.
+    `OpenWindow.tab_paths: Vec<PathBuf>` becomes
+    `tabs: Rc<RefCell<Vec<TabHandle>>>`; `focus_if_already_open` and
+    `connect_registry_cleanup` are updated mechanically to read/compare
+    through it instead. Extract `navigate_to_mode(webview, addr, mode,
+    pending_scroll_fraction, target: Mode)` from `connect_mode_toggle`'s
+    closure body (capture-scroll-then-navigate to a specific mode, not a
+    flip); the Space-bar handler calls it with `next_mode(mode.get())`,
+    the menu's Mark Up/Mark Down items call it with a fixed target. Remove
     `connect_find_shortcut`: Ctrl+F becomes the menu's own accelerator
     (step 15.6), so it isn't handled twice.
 
@@ -1078,11 +1077,10 @@ the menu's shape still matches `docs/MENUS.md`:
     selects. `Context` bundles `app`, `window`, `notebook`,
     `tabs: Rc<RefCell<Vec<TabHandle>>>`, `registry`, `prefs`, `prefs_path`,
     `recent_path`. Every item that duplicates existing toolbar behavior
-    drives the existing widget or calls the existing `pub` function
-    instead of reimplementing it: Readable Column calls
-    `toolbar::set_readable_column`; Zoom In/Out/Actual Size call
-    `toolbar::step_zoom`/`set_zoom`; the Theme submenu's radio items call
-    `theme_combo.set_active_id(...)`. New logic needed for
+    calls the existing `pub` function instead of reimplementing it:
+    Readable Column calls `toolbar::set_readable_column`; Zoom
+    In/Out/Actual Size call `toolbar::step_zoom`/`set_zoom`; the Theme
+    submenu's radio items call `toolbar::set_theme`. New logic needed for
     everything else: File > Open... (`gtk::FileChooserDialog`, reusing
     `open_files`'s existing "focus if already open, else start a tab and
     open a window" path — the same path `GApplication::connect_open`
@@ -1118,11 +1116,10 @@ the menu's shape still matches `docs/MENUS.md`:
 
 15.7 **[P]** Manual smoke-test checklist (`cargo run -p mudl-cli --
     somefile.md`): every File/Edit/View/Theme item behaves as designed
-    above; Ctrl+F isn't double-handled; the Theme menu's checkmark stays in
-    sync with the toolbar combo in both directions; Readable Column's and
-    Mark Up/Mark Down's checkmarks are correct on every menu open and track
-    a Space-bar toggle; the three disabled items are visibly disabled, not
-    just missing.
+    above; Ctrl+F isn't double-handled; the Theme menu's, Readable
+    Column's, and Mark Up/Mark Down's checkmarks are correct on every menu
+    open and track a Space-bar toggle; the three disabled items are
+    visibly disabled, not just missing.
 
 
 ## Appendix A — Step summary by parallelizability

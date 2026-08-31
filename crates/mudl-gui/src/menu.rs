@@ -710,8 +710,6 @@ fn build_theme_menu(ctx: &Context) -> gtk::MenuItem {
     theme_menu_item
 }
 
-/// Drives the current tab's existing theme combo rather than
-/// reimplementing `toolbar::build_theme_combo`'s apply/save/reload logic.
 fn connect_theme_item(item: &gtk::RadioMenuItem, ctx: &Context, theme: Theme) {
     let tabs = Rc::clone(&ctx.tabs);
     let notebook = ctx.notebook.clone();
@@ -720,9 +718,7 @@ fn connect_theme_item(item: &gtk::RadioMenuItem, ctx: &Context, theme: Theme) {
             return;
         }
         with_current_tab(&tabs, &notebook, |tab| {
-            tab.toolbar_widgets
-                .theme_combo
-                .set_active_id(Some(theme.as_str()));
+            toolbar::set_theme(&tab.toolbar_ctx, theme);
         });
     });
 }

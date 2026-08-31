@@ -1,9 +1,10 @@
-//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): theme picker and
-//! word-wrap/line-numbers toggle buttons. Zoom and Readable Column moved to
-//! the Phase 15 menu bar's View menu (`Actual Size`/`Zoom In`/`Zoom Out`/
-//! `Readable Column`) — the toolbar buttons for them were redundant with
+//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): word-wrap/
+//! line-numbers toggle buttons and the "Changes since…" popover. Zoom,
+//! Readable Column, and the theme picker moved to the Phase 15 menu bar's
+//! View/Theme menus — the toolbar controls for them were redundant with
 //! the menu items and have been removed; `set_zoom`/`step_zoom`/
-//! `set_readable_column` below are what the menu calls directly.
+//! `set_readable_column`/`set_theme` below are what the menu calls
+//! directly.
 //!
 //! Every control keeps three things in lockstep: the live WebView (via
 //! `WebView::set_zoom_level` for zoom, or a small injected script for the
@@ -69,21 +70,9 @@ impl Context {
     }
 }
 
-/// The subset of the toolbar's controls the menu bar (Phase 15.5) drives
-/// directly instead of duplicating their logic — the Theme submenu calls
-/// `theme_combo.set_active_id(...)` rather than reimplementing
-/// `build_theme_combo`'s apply/save/reload logic.
-#[derive(Clone)]
-pub struct ToolbarWidgets {
-    pub theme_combo: gtk::ComboBoxText,
-}
-
 /// Builds the toolbar widget and wires every control's signal handler.
-pub fn build(ctx: &Context) -> (gtk::Box, ToolbarWidgets) {
+pub fn build(ctx: &Context) -> gtk::Box {
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-
-    let theme_combo = build_theme_combo(ctx);
-    toolbar.pack_start(&theme_combo, false, false, 4);
 
     let line_numbers = gtk::ToggleButton::with_label("Line #s");
     let word_wrap = gtk::ToggleButton::with_label("Wrap");
@@ -102,8 +91,7 @@ pub fn build(ctx: &Context) -> (gtk::Box, ToolbarWidgets) {
     connect_changes_button(&changes_button, ctx);
     toolbar.pack_start(&changes_button, false, false, 4);
 
-    let widgets = ToolbarWidgets { theme_combo };
-    (toolbar, widgets)
+    toolbar
 }
 
 /// Wires the "Changes since…" button: on click, queries the file's git
@@ -162,30 +150,15 @@ fn refresh_changes_list(list_view: &gtk::TreeView, old: &str, new: &str) {
     crate::sidebar::populate_changes_list(list_view, &summaries);
 }
 
-fn build_theme_combo(ctx: &Context) -> gtk::ComboBoxText {
-    let combo = gtk::ComboBoxText::new();
-    for theme in Theme::all() {
-        combo.append(Some(theme.as_str()), theme.as_str());
-    }
-    combo.set_active_id(Some(ctx.prefs.borrow().theme.as_str()));
-
-    let ctx = ctx.clone();
-    combo.connect_changed(move |combo| {
-        let Some(id) = combo.active_id() else {
-            return;
-        };
-        let Some(theme) = Theme::parse(&id) else {
-            return;
-        };
-        ctx.prefs.borrow_mut().theme = theme;
-        ctx.save_and_apply();
-        // The theme is baked into the server-rendered page (its CSS is
-        // embedded inline), so — unlike zoom or the toggle classes —
-        // applying it live means re-navigating, not injecting a script.
-        ctx.webview.load_uri(&ctx.document_url());
-    });
-
-    combo
+/// Sets the theme preference and applies it live. Used by the menu's Theme
+/// submenu (Phase 15.5) — there's no toolbar picker for this anymore.
+pub fn set_theme(ctx: &Context, theme: Theme) {
+    ctx.prefs.borrow_mut().theme = theme;
+    ctx.save_and_apply();
+    // The theme is baked into the server-rendered page (its CSS is embedded
+    // inline), so — unlike zoom or the toggle classes — applying it live
+    // means re-navigating, not injecting a script.
+    ctx.webview.load_uri(&ctx.document_url());
 }
 
 /// Sets the current mode's zoom level to `value` (clamped to

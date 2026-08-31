@@ -99,7 +99,6 @@ pub(crate) struct TabHandle {
     /// jump preserves scroll position exactly like a Space-bar toggle.
     pub(crate) pending_scroll_fraction: Rc<Cell<f64>>,
     pub(crate) find_bar: find::FindBar,
-    pub(crate) toolbar_widgets: toolbar::ToolbarWidgets,
     pub(crate) sidebar_scroller: gtk::ScrolledWindow,
     /// Kept alive only to keep this tab's file watcher running (Phase
     /// 10.8) — dropped, and the watch stopped, when the tab closes (Phase
@@ -532,7 +531,7 @@ fn build_tab(
         addr,
         changes_list,
     };
-    let (toolbar_widget, toolbar_widgets) = toolbar::build(&toolbar_ctx);
+    let toolbar_widget = toolbar::build(&toolbar_ctx);
 
     let (overlay, find_bar) = find::build(&paned, &webview);
 
@@ -553,7 +552,6 @@ fn build_tab(
         toolbar_ctx,
         pending_scroll_fraction,
         find_bar,
-        toolbar_widgets,
         sidebar_scroller,
         _watch: watch,
     };
