@@ -76,6 +76,14 @@ pub fn build(ctx: &Context) -> gtk::Box {
 
     let changes_button = gtk::MenuButton::new();
     changes_button.set_label("Changes since…");
+    // GTK's GtkMenuButton disables itself when it has no `popover`/
+    // `menu-model` property attached, which this button never gets: the
+    // popover it shows is rebuilt fresh with live git data on every click
+    // (`connect_changes_button` below) and shown imperatively via
+    // `popover.popup()` rather than via the `popover` property, so GTK's
+    // own sensitivity bookkeeping never sees one and leaves the button
+    // permanently disabled unless overridden here.
+    changes_button.set_sensitive(true);
     connect_changes_button(&changes_button, ctx);
     toolbar.pack_start(&changes_button, false, false, 4);
 
