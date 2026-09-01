@@ -7,6 +7,8 @@ mod config;
 mod find;
 mod geometry;
 mod linkaction;
+mod menu;
+mod recent;
 mod sidebar;
 mod toggle;
 mod toolbar;

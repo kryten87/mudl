@@ -20,10 +20,13 @@ fn find_options() -> u32 {
 }
 
 /// The find bar's widgets, returned so the window's Ctrl+F handler can
-/// show and focus it.
+/// show and focus it, and so the menu bar's Find Next/Previous items
+/// (Phase 15.2) can drive the same `WebKitFindController` the bar's own
+/// ▲/▼ buttons use.
 pub struct FindBar {
     pub container: gtk::Box,
     pub entry: gtk::SearchEntry,
+    find_controller: Option<webkit2gtk::FindController>,
 }
 
 impl FindBar {
@@ -31,6 +34,23 @@ impl FindBar {
     pub fn show(&self) {
         self.container.show();
         self.entry.grab_focus();
+    }
+
+    /// Repeats the current search forward/backward, if the bar has one
+    /// (its own ▲/▼ buttons are no-ops on an empty query for the same
+    /// reason: `WebKitFindController::search_next`/`search_previous` search
+    /// whatever query `search` was last called with, and none has been if
+    /// the entry is empty).
+    pub fn search_next(&self) {
+        if let Some(controller) = &self.find_controller {
+            controller.search_next();
+        }
+    }
+
+    pub fn search_previous(&self) {
+        if let Some(controller) = &self.find_controller {
+            controller.search_previous();
+        }
     }
 }
 
@@ -63,13 +83,22 @@ pub fn build(
 
     overlay.add_overlay(&container);
 
-    let bar = FindBar { container, entry };
-
     let Some(find_controller) = webview.find_controller() else {
         // No FindController available (shouldn't happen in practice — see
         // the module doc comment — but the binding models it as
         // `Option`); the bar stays built but inert rather than panicking.
+        let bar = FindBar {
+            container,
+            entry,
+            find_controller: None,
+        };
         return (overlay, bar);
+    };
+
+    let bar = FindBar {
+        container,
+        entry,
+        find_controller: Some(find_controller.clone()),
     };
 
     {

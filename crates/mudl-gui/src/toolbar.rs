@@ -1,5 +1,10 @@
-//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): theme picker,
-//! zoom in/out, and word-wrap/line-numbers/readable-column toggle buttons.
+//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): now just the
+//! "Changes since…" popover. Zoom, Readable Column, Line Numbers, Word
+//! Wrap, and the theme picker all moved to the Phase 15 menu bar's
+//! View/Theme menus — the toolbar controls for them were redundant with
+//! the menu items and have been removed; `set_zoom`/`step_zoom`/
+//! `set_readable_column`/`set_line_numbers`/`set_word_wrap`/`set_theme`
+//! below are what the menu calls directly.
 //!
 //! Every control keeps three things in lockstep: the live WebView (via
 //! `WebView::set_zoom_level` for zoom, or a small injected script for the
@@ -25,7 +30,9 @@ use mudl_server::server::DocumentSource;
 use crate::changes;
 use crate::config;
 
-const ZOOM_STEP: f64 = 0.1;
+/// The step `step_zoom` moves by — reused by the Phase 15 menu's Zoom
+/// In/Out items.
+pub const ZOOM_STEP: f64 = 0.1;
 const ZOOM_RANGE: RangeInclusive<f64> = 0.1..=10.0;
 
 /// Everything a toolbar control needs to read current state and apply a
@@ -67,34 +74,16 @@ impl Context {
 pub fn build(ctx: &Context) -> gtk::Box {
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
 
-    let theme_combo = build_theme_combo(ctx);
-    toolbar.pack_start(&theme_combo, false, false, 4);
-
-    let zoom_out = gtk::Button::with_label("-");
-    let zoom_in = gtk::Button::with_label("+");
-    connect_zoom_button(&zoom_out, ctx, -ZOOM_STEP);
-    connect_zoom_button(&zoom_in, ctx, ZOOM_STEP);
-    toolbar.pack_start(&zoom_out, false, false, 0);
-    toolbar.pack_start(&zoom_in, false, false, 4);
-
-    let line_numbers = gtk::ToggleButton::with_label("Line #s");
-    let word_wrap = gtk::ToggleButton::with_label("Wrap");
-    let readable_column = gtk::ToggleButton::with_label("Readable");
-    {
-        let prefs = ctx.prefs.borrow();
-        line_numbers.set_active(prefs.down_mode_show_line_numbers);
-        word_wrap.set_active(prefs.down_mode_wrap_lines);
-        readable_column.set_active(prefs.ui_show_readable_column);
-    }
-    connect_line_numbers_toggle(&line_numbers, ctx);
-    connect_word_wrap_toggle(&word_wrap, ctx);
-    connect_readable_column_toggle(&readable_column, ctx);
-    toolbar.pack_start(&line_numbers, false, false, 4);
-    toolbar.pack_start(&word_wrap, false, false, 0);
-    toolbar.pack_start(&readable_column, false, false, 0);
-
     let changes_button = gtk::MenuButton::new();
     changes_button.set_label("Changes since…");
+    // GTK's GtkMenuButton disables itself when it has no `popover`/
+    // `menu-model` property attached, which this button never gets: the
+    // popover it shows is rebuilt fresh with live git data on every click
+    // (`connect_changes_button` below) and shown imperatively via
+    // `popover.popup()` rather than via the `popover` property, so GTK's
+    // own sensitivity bookkeeping never sees one and leaves the button
+    // permanently disabled unless overridden here.
+    changes_button.set_sensitive(true);
     connect_changes_button(&changes_button, ctx);
     toolbar.pack_start(&changes_button, false, false, 4);
 
@@ -157,84 +146,76 @@ fn refresh_changes_list(list_view: &gtk::TreeView, old: &str, new: &str) {
     crate::sidebar::populate_changes_list(list_view, &summaries);
 }
 
-fn build_theme_combo(ctx: &Context) -> gtk::ComboBoxText {
-    let combo = gtk::ComboBoxText::new();
-    for theme in Theme::all() {
-        combo.append(Some(theme.as_str()), theme.as_str());
-    }
-    combo.set_active_id(Some(ctx.prefs.borrow().theme.as_str()));
-
-    let ctx = ctx.clone();
-    combo.connect_changed(move |combo| {
-        let Some(id) = combo.active_id() else {
-            return;
-        };
-        let Some(theme) = Theme::parse(&id) else {
-            return;
-        };
-        ctx.prefs.borrow_mut().theme = theme;
-        ctx.save_and_apply();
-        // The theme is baked into the server-rendered page (its CSS is
-        // embedded inline), so — unlike zoom or the toggle classes —
-        // applying it live means re-navigating, not injecting a script.
-        ctx.webview.load_uri(&ctx.document_url());
-    });
-
-    combo
+/// Sets the theme preference and applies it live. Used by the menu's Theme
+/// submenu (Phase 15.5) — there's no toolbar picker for this anymore.
+pub fn set_theme(ctx: &Context, theme: Theme) {
+    ctx.prefs.borrow_mut().theme = theme;
+    ctx.save_and_apply();
+    // The theme is baked into the server-rendered page (its CSS is embedded
+    // inline), so — unlike zoom or the toggle classes — applying it live
+    // means re-navigating, not injecting a script.
+    ctx.webview.load_uri(&ctx.document_url());
 }
 
-fn connect_zoom_button(button: &gtk::Button, ctx: &Context, delta: f64) {
-    let ctx = ctx.clone();
-    button.connect_clicked(move |_| {
-        let mode = ctx.mode.get();
-        let current = {
-            let prefs = ctx.prefs.borrow();
-            match mode {
-                Mode::Up => prefs.up_mode_zoom_level,
-                Mode::Down => prefs.down_mode_zoom_level,
-            }
-        };
-        let next = (current + delta).clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
-        {
-            let mut prefs = ctx.prefs.borrow_mut();
-            match mode {
-                Mode::Up => prefs.up_mode_zoom_level = next,
-                Mode::Down => prefs.down_mode_zoom_level = next,
-            }
+/// Sets the current mode's zoom level to `value` (clamped to
+/// `ZOOM_RANGE`), applies it to the live `WebView`, and persists it. Used
+/// by the menu's absolute-value "Actual Size" item and by `step_zoom`
+/// below.
+pub fn set_zoom(ctx: &Context, value: f64) {
+    let mode = ctx.mode.get();
+    let clamped = value.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
+    {
+        let mut prefs = ctx.prefs.borrow_mut();
+        match mode {
+            Mode::Up => prefs.up_mode_zoom_level = clamped,
+            Mode::Down => prefs.down_mode_zoom_level = clamped,
         }
-        ctx.webview.set_zoom_level(next);
-        ctx.save_and_apply();
-    });
+    }
+    ctx.webview.set_zoom_level(clamped);
+    ctx.save_and_apply();
 }
 
-fn connect_line_numbers_toggle(button: &gtk::ToggleButton, ctx: &Context) {
-    let ctx = ctx.clone();
-    button.connect_toggled(move |button| {
-        let active = button.is_active();
-        ctx.prefs.borrow_mut().down_mode_show_line_numbers = active;
-        toggle_root_class(&ctx.webview, "has-line-numbers", active);
-        ctx.save_and_apply();
-    });
+/// Moves the current mode's zoom level by `delta` (positive to zoom in,
+/// negative to zoom out) via `set_zoom`. Used by the menu's Zoom In/Out
+/// items (Phase 15.5) — there's no toolbar button for this anymore.
+pub fn step_zoom(ctx: &Context, delta: f64) {
+    let current = {
+        let prefs = ctx.prefs.borrow();
+        match ctx.mode.get() {
+            Mode::Up => prefs.up_mode_zoom_level,
+            Mode::Down => prefs.down_mode_zoom_level,
+        }
+    };
+    set_zoom(ctx, current + delta);
 }
 
-fn connect_word_wrap_toggle(button: &gtk::ToggleButton, ctx: &Context) {
-    let ctx = ctx.clone();
-    button.connect_toggled(move |button| {
-        let active = button.is_active();
-        ctx.prefs.borrow_mut().down_mode_wrap_lines = active;
-        toggle_root_class(&ctx.webview, "has-word-wrap", active);
-        ctx.save_and_apply();
-    });
+/// Sets whether Down mode's raw-source view shows gutter line numbers, and
+/// applies it live. Used by the menu's "Line Numbers" item (Phase 15) —
+/// there's no toolbar button for this anymore. Only visible in Down mode
+/// (Space bar, or View > Mark Down); has no visible effect in Up mode.
+pub fn set_line_numbers(ctx: &Context, active: bool) {
+    ctx.prefs.borrow_mut().down_mode_show_line_numbers = active;
+    toggle_root_class(&ctx.webview, "has-line-numbers", active);
+    ctx.save_and_apply();
 }
 
-fn connect_readable_column_toggle(button: &gtk::ToggleButton, ctx: &Context) {
-    let ctx = ctx.clone();
-    button.connect_toggled(move |button| {
-        let active = button.is_active();
-        ctx.prefs.borrow_mut().ui_show_readable_column = active;
-        toggle_root_class(&ctx.webview, "is-readable-column", active);
-        ctx.save_and_apply();
-    });
+/// Sets whether Down mode's raw-source view wraps long lines, and applies
+/// it live. Used by the menu's "Word Wrap" item (Phase 15) — there's no
+/// toolbar button for this anymore. Only visible in Down mode; has no
+/// visible effect in Up mode.
+pub fn set_word_wrap(ctx: &Context, active: bool) {
+    ctx.prefs.borrow_mut().down_mode_wrap_lines = active;
+    toggle_root_class(&ctx.webview, "has-word-wrap", active);
+    ctx.save_and_apply();
+}
+
+/// Sets the Readable Column preference and applies it live to `ctx`'s
+/// `WebView`. Used by the menu's "Readable Column" item (Phase 15.5) —
+/// there's no toolbar button for this anymore.
+pub fn set_readable_column(ctx: &Context, active: bool) {
+    ctx.prefs.borrow_mut().ui_show_readable_column = active;
+    toggle_root_class(&ctx.webview, "is-readable-column", active);
+    ctx.save_and_apply();
 }
 
 /// Adds or removes `class` on `<html>` in the live page — the `mud`

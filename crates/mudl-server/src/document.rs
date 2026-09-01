@@ -39,7 +39,7 @@ pub struct DocumentConfig {
     pub up_zoom: f64,
     pub down_zoom: f64,
     /// Down mode's `has-line-numbers` root class (`mud-down.css`'s
-    /// `html:not(.has-line-numbers) .ln { ... }`).
+    /// `html:not(.has-line-numbers) .line { ... }`).
     pub show_line_numbers: bool,
     /// Down mode's `has-word-wrap` root class (`mud-down.css`).
     pub wrap_lines: bool,

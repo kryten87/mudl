@@ -16,116 +16,76 @@
 
 /* -- Line container ------------------------------------------------------- */
 
-.down-lines {
+/* `mudl_core::render::render_down` emits one `<div class="line"
+   data-line="N">` per source line (a deliberate simplification over
+   `mud`'s own `.dl`/`.ln`/`.lc` split-container line structure — see
+   `docs/IMPLEMENTATION-PLAN.md` Phase 2.4's "actual numbering is
+   CSS-driven" note) — line numbers below are generated from a CSS
+   counter on `.line` itself, not a separate sibling element. */
+
+.down-mode-output {
+  counter-reset: line;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.875em;
   line-height: 1.6;
 }
 
-
-/* Each line: flex row.  Default stretch alignment ensures .ln
-   background covers the full row height when .lc wraps. */
-
-.dl {
-  display: flex;
+.line {
+  position: relative;
+  padding: 0 1em 0 4.5em;
 }
 
-.down-lines > .dl:first-child > *,
-.down-lines > .dc-scroll:first-child > .dl:first-child > * {
+.line:first-child {
   padding-top: 2rem;
 }
 
-.down-lines > .dl:last-child > *,
-.down-lines > .dc-scroll:last-child > .dl:last-child > * {
+.line:last-child {
   padding-bottom: 6rem; /* Space for floating bars beneath */
 }
 
 
 /* -- Line numbers --------------------------------------------------------- */
 
-.ln {
-  position: sticky;
+.line::before {
+  counter-increment: line;
+  content: counter(line);
+  position: absolute;
   left: 0;
-  z-index: 2;
-  flex: 0 0 4em;
+  top: 0;
+  width: 3.5em;
   padding-right: 1em;
   text-align: right;
   font-size: 0.85em;
   font-weight: 300;
   user-select: none;
   -webkit-user-select: none;
-  white-space: nowrap;
-  background: color-mix(in srgb, var(--code-bg), var(--bg-color));
   color: color-mix(in srgb, var(--blockquote-color), var(--bg-color));
-  line-height: 1.7;
 }
 
-html:not(.has-line-numbers) .ln {
-  visibility: hidden;
-  flex-basis: 0;
-  width: 0;
-  padding: 0;
+html:not(.has-line-numbers) .line {
+  padding-left: 1em;
+}
+
+html:not(.has-line-numbers) .line::before {
+  content: none;
 }
 
 
-/* -- Line content --------------------------------------------------------- */
+/* -- Word wrap -------------------------------------------------------------
+   `.line`'s text is raw source (leading whitespace is meaningful), so the
+   default is `pre` — preserved verbatim, no wrapping, horizontal scroll via
+   `.down-mode-output`'s own `overflow-x: auto` when a line is long. Toggling
+   Word Wrap on switches to `pre-wrap`, wrapping long lines within the
+   viewport instead. */
 
-.lc {
-  flex: 1 1 auto;
+.line {
   white-space: pre;
-  padding: 0 1em;
-  min-width: 0;
 }
 
-.has-word-wrap .dl:not(.dc-code) .lc {
+.has-word-wrap .line {
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
-
-
-/* -- Code blocks ---------------------------------------------------------- */
-
-.dc-fence .lc,
-.dc-code .lc {
-  background: var(--code-bg);
-}
-
-/* Code fence lines — content dimmed, line number untouched */
-
-.dc-fence .lc {
-  opacity: 0.5;
-}
-
-/* When word-wrap is off, grow the container to the widest content
-   so all lines share the same width and line numbers stick across
-   the full scroll range. */
-
-html:not(.has-word-wrap) .down-lines {
-  min-width: max-content;
-}
-
-/* Scrollable code block wrapper */
-
-.dc-scroll {
-  display: grid;
-}
-
-/* When word-wrap is on, code blocks scroll independently. */
-
-.has-word-wrap .dc-scroll {
-  overflow-x: auto;
-  overscroll-behavior-x: none;
-}
-
-/* Code lines grow to fit content — triggers dc-scroll scrolling
-   when word-wrap is on. */
-
-.has-word-wrap .dc-code {
-  min-width: max-content;
-}
-
-
-/* Print: don't clip code blocks — see mud-print.css. */
 
 
 /* -- AST-based syntax highlighting ---------------------------------------- */

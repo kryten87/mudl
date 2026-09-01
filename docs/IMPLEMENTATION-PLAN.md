@@ -1001,6 +1001,143 @@ mode" case).
     `ChangeSource` was designed as a trait from the start.
 
 
+## 21. Phase 15 — Menu bar
+
+Source material: `docs/MENUS.md` (the menu/item/accelerator list, ported
+from `mud`'s macOS menu bar). Additive to `mudl-gui`, same spirit as Phases
+13–14: nothing in Phases 0–14 needs to change shape for this, since every
+control the menu bar drives already exists as a function call or a widget
+signal — the menu bar mostly just gives those existing code paths a second
+entry point.
+
+Three items are explicitly out of scope for this phase, shipped as visible
+but disabled (`set_sensitive(false)`) menu entries rather than omitted, so
+the menu's shape still matches `docs/MENUS.md`:
+
+- **View > Show Comments** and **Edit > Add Comment** (they share the
+  Ctrl-Shift-K accelerator) — both need the sidebar's pane
+  (Outline/Changes/Comments — Appendix B's `sidebarPane`, today fixed
+  per-tab at open time) to become switchable at runtime, which is a
+  separate follow-up.
+- **View > Hide Changes** — needs a new CSS class to hide the `<ins>`/
+  `<del>` waypoint-diff overlay independently of clearing the waypoint
+  (Phase 13.8's overlay); deferred.
+- **Edit > Undo/Redo** — the only editable widget in the app is the
+  Phase 14.7 comments compose `TextView`, and GTK3's `TextView` has no
+  built-in undo/redo (a GTK4 feature); hand-rolling a stack is deferred.
+
+15.1 **[P]** `mudl_gui::recent` — Open Recent's backing store, modeled on
+    `mudl_gui::geometry` (Phase 10.7): its own on-disk file
+    (`~/.config/mudl/recent-files`, one path per line) via
+    `mudl_config::FileSystem` DI, re-read-fresh-before-write, kept out of
+    `Preferences` because an open-ended ordered list doesn't fit that
+    fixed-schema round-trip. `parse(text: &str) -> Vec<PathBuf>`,
+    `serialize(paths: &[PathBuf]) -> String`, and the pure MRU update
+    `record(existing: &[PathBuf], opened: &Path, max: usize) -> Vec<PathBuf>`
+    (move-to-front dedup, capped at `max`). Tests: empty file; a path
+    reopened moves to front without duplicating; the list is capped at
+    `max` with the oldest entry dropped; recording into an empty list.
+    Impure `load`/`save` wrappers tested with `InMemoryFileSystem`, same
+    shape as `geometry::load`/`save`.
+
+15.2 **[P]** `find::FindBar` gains `search_next`/`search_previous` methods,
+    storing the `WebKitFindController` it already looks up in the struct
+    instead of only closing over it locally — lets the menu's Find
+    Next/Previous items and the find bar's own ▲/▼ buttons share one path.
+
+15.3 **[P]** The toolbar's Zoom In/Out, Readable Column, and theme-picker
+    controls are redundant with the menu's own View/Theme items (below)
+    and are removed; `toolbar::build` goes back to returning just
+    `gtk::Box` (no widgets left for the menu to drive directly).
+    `toolbar::set_zoom(ctx: &Context, value: f64)`,
+    `toolbar::step_zoom(ctx: &Context, delta: f64)` (delta-based, calling
+    `set_zoom`), `toolbar::set_readable_column(ctx: &Context, active:
+    bool)`, and `toolbar::set_theme(ctx: &Context, theme: Theme)` are
+    `pub` functions the menu calls directly, extracted from the old
+    zoom-button, readable-column-button, and theme-combo closures.
+
+15.4 **[S, depends on 15.2–15.3]** `window.rs`: introduce `TabHandle`
+    (path, webview, `toolbar::Context`, `FindBar`, the sidebar's
+    `ScrolledWindow`, and a Mark Up/Mark Down radio-item pair kept in sync
+    with `mode`), returned from `build_tab` alongside its root widget.
+    `OpenWindow.tab_paths: Vec<PathBuf>` becomes
+    `tabs: Rc<RefCell<Vec<TabHandle>>>`; `focus_if_already_open` and
+    `connect_registry_cleanup` are updated mechanically to read/compare
+    through it instead. Extract `navigate_to_mode(webview, addr, mode,
+    pending_scroll_fraction, target: Mode)` from `connect_mode_toggle`'s
+    closure body (capture-scroll-then-navigate to a specific mode, not a
+    flip); the Space-bar handler calls it with `next_mode(mode.get())`,
+    the menu's Mark Up/Mark Down items call it with a fixed target. Remove
+    `connect_find_shortcut`: Ctrl+F becomes the menu's own accelerator
+    (step 15.6), so it isn't handled twice.
+
+15.5 **[S, depends on 15.4]** `mudl_gui::menu` — `pub fn build(ctx: &Context)
+    -> gtk::MenuBar`, one menu bar per window (not per tab, unlike the
+    toolbar), acting on whichever tab `notebook.current_page()` currently
+    selects. `Context` bundles `app`, `window`, `notebook`,
+    `tabs: Rc<RefCell<Vec<TabHandle>>>`, `registry`, `prefs`, `prefs_path`,
+    `recent_path`. Every item that duplicates existing toolbar behavior
+    calls the existing `pub` function instead of reimplementing it:
+    Readable Column calls `toolbar::set_readable_column`; Zoom
+    In/Out/Actual Size call `toolbar::step_zoom`/`set_zoom`; the Theme
+    submenu's radio items call `toolbar::set_theme`. New logic needed for
+    everything else: File > Open... (`gtk::FileChooserDialog`, reusing
+    `open_files`'s existing "focus if already open, else start a tab and
+    open a window" path — the same path `GApplication::connect_open`
+    already uses); Open Recent (submenu rebuilt from `recent::load` on
+    every parent-menu `show`, same open path, plus `recent::record`+`save`
+    on every successful open, in both this menu and the existing
+    `connect_open` handler); Open In Browser
+    (`gtk::gio::AppInfo::launch_default_for_uri`, same call
+    `connect_link_navigation`'s external-link branch already makes);
+    Print... (`webkit2gtk::PrintOperation::new(&webview).run_dialog(Some(&window))`);
+    Reload (`webview.reload_bypass_cache()`); Close (removes the current
+    notebook page and its `TabHandle`, closing the window if that was the
+    last tab); Cut/Copy/Paste/Delete/Select All (resolve
+    `window.focused_widget()`; `gtk::Entry`/`gtk::TextView` use their own
+    `Editable`/`TextBuffer` clipboard methods, the `WebView` only answers
+    Copy/Select All via `execute_editing_command`, since page content isn't
+    editable — GTK/WebKit glue, no pure core to extract, verified manually
+    per the same principle Phase 10's intro states); Find (shows the
+    current tab's find bar); Find Next/Previous (15.2's new methods);
+    Hide Sidebar (toggles the current tab's sidebar `ScrolledWindow`
+    visibility and `Preferences.sidebar_enabled` — an existing field
+    nothing has read until now; `build_tab` starts a new tab's sidebar
+    from it). Show Comments, Add Comment, Hide Changes, Undo, Redo are
+    built `set_sensitive(false)` per the phase intro.
+
+15.6 **[S, depends on 15.5]** Wire accelerators via a `gtk::AccelGroup`
+    added to the window, one `add_accelerator("activate", ...)` per
+    `docs/MENUS.md` shortcut, and pack the menu bar above the
+    `gtk::Notebook` (the window's direct child becomes a `gtk::Box`
+    wrapping both, not the `Notebook` alone). Not unit-tested (GTK signal
+    wiring, per Phase 10's own framing); verified by the manual checklist
+    in 15.7.
+
+15.7 **[P]** Manual smoke-test checklist (`cargo run -p mudl-cli --
+    somefile.md`): every File/Edit/View/Theme item behaves as designed
+    above; Ctrl+F isn't double-handled; the Theme menu's, Readable
+    Column's, and Mark Up/Mark Down's checkmarks are correct on every menu
+    open and track a Space-bar toggle; the three disabled items are
+    visibly disabled, not just missing.
+
+15.8 **[P]** Follow-up: the toolbar's remaining "Line #s"/"Wrap" buttons
+    (Down-mode-only gutter line numbers / long-line wrapping — easy to
+    mistake for broken, since they have no visible effect while looking
+    at Up mode) are removed the same way 15.3 removed Zoom/Readable
+    Column/Theme, and added to the View menu instead, right after
+    Readable Column (`docs/MENUS.md` gains "Line Numbers"/"Word Wrap",
+    flagged as mudl-only additions with no `mud` equivalent).
+    `toolbar::set_line_numbers`/`set_word_wrap(ctx: &Context, active:
+    bool)` are extracted the same way `set_readable_column` was;
+    `connect_view_menu_show`'s growing checkable-widget list is bundled
+    into a `ViewMenuCheckables` struct to stay under clippy's
+    too-many-arguments threshold, and its resync reads all three
+    Down-mode/Readable-Column flags out of one `prefs.borrow()` block
+    before calling any `set_active` (same `BorrowMutError` hazard 15.5's
+    original Readable Column resync already had to avoid).
+
+
 ## Appendix A — Step summary by parallelizability
 
 Everything in Phase 1 (13 steps) can start immediately and run fully in
@@ -1015,7 +1152,9 @@ render functions. Phase 10 (GUI) is the long pole — it depends on Phases
 independent of each other once 10.1 exists. Phases 11–12 are cleanup/
 packaging and can start as soon as the pieces they document/wrap exist.
 Phases 13–14 are independent of each other and can be built in either order
-or in parallel once Phase 12 is done.
+or in parallel once Phase 12 is done. Phase 15 depends on Phase 10 (it
+extends the same GTK shell) and, for its Theme/Readable Column items, on
+Phase 10.4's toolbar controls existing to drive.
 
 
 ## Appendix B — Preference key mapping (`mud` → `mudl`, core-viewer scope)
