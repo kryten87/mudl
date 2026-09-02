@@ -604,11 +604,11 @@ fn connect_zoom_restore(
 /// tab's own `mudl-server` pages) or takes over: focuses whichever window
 /// already has the target file open (or spawns a new `mudl` window) for a
 /// local `.md`/`.markdown` link, hands an `http(s)://`/`mailto:` link to
-/// the OS's default browser/mail client, or hands any other local file to
-/// `xdg-open`.
+/// the OS's default browser/mail client, or — after the reader confirms a
+/// dialog naming the file — hands any other local file to `xdg-open`.
 fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr, registry: Registry) {
     let server_addr = addr.to_string();
-    webview.connect_decide_policy(move |_webview, decision, decision_type| {
+    webview.connect_decide_policy(move |webview, decision, decision_type| {
         if decision_type != PolicyDecisionType::NavigationAction {
             return false;
         }
@@ -645,11 +645,34 @@ fn connect_link_navigation(webview: &webkit2gtk::WebView, addr: SocketAddr, regi
             }
             crate::linkaction::LinkAction::OpenWithSystemDefault(path) => {
                 decision.ignore();
-                let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                if confirm_open_with_system_default(webview, &path) {
+                    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                }
                 true
             }
         }
     });
+}
+
+/// A viewer isn't an application a reader expects to launch anything, so a
+/// link to a non-`.md` local file (Finding 5, `docs/SECURITY.md`) needs
+/// explicit confirmation before `xdg-open` runs, rather than launching it
+/// on a bare click.
+fn confirm_open_with_system_default(webview: &webkit2gtk::WebView, path: &Path) -> bool {
+    let parent = webview.toplevel().and_downcast::<gtk::Window>();
+    let dialog = gtk::MessageDialog::new(
+        parent.as_ref(),
+        gtk::DialogFlags::MODAL,
+        gtk::MessageType::Question,
+        gtk::ButtonsType::None,
+        &format!("Open \"{}\" with its default application?", path.display()),
+    );
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Open", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Cancel);
+    let response = dialog.run();
+    dialog.close();
+    response == gtk::ResponseType::Accept
 }
 
 /// Spawns `path` as a new `mudl` invocation (re-exec'ing this same binary

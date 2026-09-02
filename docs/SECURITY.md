@@ -228,7 +228,18 @@ per-document opt-in.
 
 ## 5. Link clicks hand arbitrary local files to `xdg-open`
 
-**Severity: medium.** Requires a click.
+**Severity: medium. Fixed.**
+
+`connect_link_navigation` (`crates/mudl-gui/src/window.rs`) now shows a
+modal confirmation dialog — naming the exact path — before running
+`xdg-open`, via `confirm_open_with_system_default`. `xdg-open` only runs
+if the reader clicks "Open"; "Cancel" (or closing the dialog) leaves the
+file untouched. This does not change what `xdg-open` is allowed to
+launch, only that the reader must knowingly consent to launching it,
+which is the informed-consent gap the original finding described.
+
+The description below is preserved as the original record of what was
+found.
 
 `rewrite_local_link_hrefs` routes every non-`.md` local link through
 `/local-file/`, `crate::linkaction::classify` turns that into
