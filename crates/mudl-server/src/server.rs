@@ -7,6 +7,7 @@
 //! of concurrent requests from a single local WebView, not production web
 //! traffic (see the plan's rationale in §10, step 4.5).
 
+use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,12 @@ use crate::version::VersionCounter;
 pub struct DocumentSource {
     pub path: PathBuf,
     pub config: Mutex<DocumentConfig>,
+    /// The absolute local paths the most recent render of `path` actually
+    /// referenced (via `<img src>`) — the allowlist `Route::LocalFile`
+    /// (`serve_local_file`) is confined to. Closes `docs/SECURITY.md`
+    /// Finding 2: `/local/<path>` used to read and return any path a
+    /// request named, with no relation to the document being viewed.
+    allowed_local_paths: Mutex<HashSet<PathBuf>>,
 }
 
 impl DocumentSource {
@@ -44,6 +51,7 @@ impl DocumentSource {
         Self {
             path,
             config: Mutex::new(DocumentConfig::default()),
+            allowed_local_paths: Mutex::new(HashSet::new()),
         }
     }
 
@@ -55,6 +63,18 @@ impl DocumentSource {
 
     fn config_snapshot(&self) -> DocumentConfig {
         self.config.lock().unwrap().clone()
+    }
+
+    /// Records the local paths the render that just produced this page
+    /// referenced, replacing whatever the previous render allowed.
+    fn set_allowed_local_paths(&self, paths: Vec<PathBuf>) {
+        *self.allowed_local_paths.lock().unwrap() = paths.into_iter().collect();
+    }
+
+    /// Whether `path` was referenced by the most recent render — the only
+    /// paths `Route::LocalFile` may serve.
+    fn allows_local_path(&self, path: &Path) -> bool {
+        self.allowed_local_paths.lock().unwrap().contains(path)
     }
 }
 
@@ -154,7 +174,7 @@ fn respond_to(
         Route::Document(mode, waypoint) => {
             serve_document(mode, waypoint, version, filesystem, document, git_runner)
         }
-        Route::LocalFile(path) => serve_local_file(&path, filesystem),
+        Route::LocalFile(path) => serve_local_file(&path, filesystem, document),
         Route::WaitForChange(since) => wait_for_change(since, version),
         Route::NotFound => not_found(),
     }
@@ -207,7 +227,7 @@ fn serve_document(
         }
     }
 
-    let html = document::render(
+    let (html, allowed_local_paths) = document::render(
         &markdown,
         base_dir,
         &title,
@@ -215,6 +235,7 @@ fn serve_document(
         version.current(),
         &config,
     );
+    document.set_allowed_local_paths(allowed_local_paths);
     http::format_response(200, &[("Content-Type", "text/html")], html.as_bytes())
 }
 
@@ -248,7 +269,16 @@ fn serve_asset(name: &str) -> Vec<u8> {
 /// reported as a plain 404 — matching the plan's Linux-simplification note
 /// (§1) that a bare `ENOENT`/`EACCES` distinction from `std::fs` is enough,
 /// with no sandboxed denied-vs-missing distinction to preserve.
-fn serve_local_file(path: &str, filesystem: &dyn FileSystem) -> Vec<u8> {
+///
+/// `path` is only read if it's in `document`'s current allowlist — the set
+/// of local paths its last render actually referenced (`docs/SECURITY.md`
+/// Finding 2). Anything else is reported as 404, indistinguishable from a
+/// path that simply doesn't exist, so a request can't use the response to
+/// probe which files are present versus merely disallowed.
+fn serve_local_file(path: &str, filesystem: &dyn FileSystem, document: &DocumentSource) -> Vec<u8> {
+    if !document.allows_local_path(Path::new(path)) {
+        return not_found();
+    }
     match filesystem.read(Path::new(path)) {
         Ok(content) => {
             let content_type = crate::mime::lookup(extension_of(path));
@@ -454,17 +484,31 @@ mod respond_to_tests {
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
 
+    /// Performs a `/` request first so the document's render populates its
+    /// allowlist, matching how a real WebView always loads the page before
+    /// it can request any image the page embeds.
+    fn render_document_first(
+        version: &VersionCounter,
+        filesystem: &dyn FileSystem,
+        document: &DocumentSource,
+    ) {
+        respond_to(&req("/"), version, filesystem, document, &git_runner());
+    }
+
     #[test]
     fn local_file_route_present_in_filesystem_is_200_with_content_type_and_body() {
         let version = VersionCounter::new();
         let filesystem = InMemoryFileSystem::new();
-        filesystem.insert("/tmp/notes/photo.png", b"fake-png-bytes".to_vec());
+        filesystem.insert("/docs/notes.md", b"![alt](photo.png)".to_vec());
+        filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
+        let document = document_source();
+        render_document_first(&version, &filesystem, &document);
 
         let response = respond_to(
-            &req("/local/%2Ftmp%2Fnotes%2Fphoto.png"),
+            &req("/local/%2Fdocs%2Fphoto.png"),
             &version,
             &filesystem,
-            &document_source(),
+            &document,
             &git_runner(),
         );
 
@@ -477,10 +521,53 @@ mod respond_to_tests {
     #[test]
     fn local_file_route_absent_from_filesystem_is_404() {
         let version = VersionCounter::new();
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", b"![alt](missing.md)".to_vec());
+        let document = document_source();
+        render_document_first(&version, &filesystem, &document);
+
         let response = respond_to(
-            &req("/local/%2Ftmp%2Fmissing.md"),
+            &req("/local/%2Fdocs%2Fmissing.md"),
             &version,
-            &empty_fs(),
+            &filesystem,
+            &document,
+            &git_runner(),
+        );
+        assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
+    }
+
+    #[test]
+    fn local_file_route_not_referenced_by_the_document_is_404_even_if_present_on_disk() {
+        // The core of Finding 2: a path that exists and is readable, but
+        // that the current document never referenced, must not be served —
+        // otherwise `/local/<any-path>` is an arbitrary file read.
+        let version = VersionCounter::new();
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", b"no images here".to_vec());
+        filesystem.insert("/etc/passwd", b"root:x:0:0::/root:/bin/bash".to_vec());
+        let document = document_source();
+        render_document_first(&version, &filesystem, &document);
+
+        let response = respond_to(
+            &req("/local/%2Fetc%2Fpasswd"),
+            &version,
+            &filesystem,
+            &document,
+            &git_runner(),
+        );
+        assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
+    }
+
+    #[test]
+    fn local_file_route_requested_before_any_document_render_is_404() {
+        let version = VersionCounter::new();
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
+
+        let response = respond_to(
+            &req("/local/%2Fdocs%2Fphoto.png"),
+            &version,
+            &filesystem,
             &document_source(),
             &git_runner(),
         );

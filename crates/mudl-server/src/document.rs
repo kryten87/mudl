@@ -18,10 +18,11 @@ use mudl_core::options::RenderOptions;
 use mudl_core::render::{render_down, render_up};
 use mudl_core::resources;
 use mudl_core::template::{
-    rewrite_local_image_srcs, rewrite_local_link_hrefs, select_assets, HtmlDocument, Script,
+    rewrite_local_image_srcs_with_paths, rewrite_local_link_hrefs, select_assets, HtmlDocument,
+    Script,
 };
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::assets;
 use crate::routes::Mode;
@@ -64,6 +65,12 @@ impl Default for DocumentConfig {
 
 /// Renders the complete HTML page for `markdown` (the file's current
 /// contents), in `mode`, at long-poll baseline `version`.
+///
+/// Also returns the absolute local paths every rewritten `<img src>`
+/// resolved to — `server.rs` records these on `DocumentSource` so
+/// `Route::LocalFile` can confine itself to exactly the files this render
+/// referenced, rather than serving any path a request names (`docs/SECURITY.md`
+/// Finding 2).
 pub fn render(
     markdown: &str,
     base_dir: &Path,
@@ -71,14 +78,20 @@ pub fn render(
     mode: Mode,
     version: u64,
     config: &DocumentConfig,
-) -> String {
+) -> (String, Vec<PathBuf>) {
     let body = match mode {
         Mode::Up => render_up(markdown, &config.render_options),
         Mode::Down => render_down(markdown, &config.render_options),
     };
-    let body = rewrite_local_image_srcs(&body, base_dir);
+    let (body, allowed_local_paths) = rewrite_local_image_srcs_with_paths(&body, base_dir);
     let body = rewrite_local_link_hrefs(&body, base_dir);
-    let wrapped = format!("<div class=\"{}\">{body}</div>", wrapper_class(mode));
+    // `data-mudl-version` carries the live-reload baseline to
+    // `live-reload.js` without an inline `<script>` — see the
+    // `csp_script_src` comment below.
+    let wrapped = format!(
+        "<div class=\"{}\" data-mudl-version=\"{version}\">{body}</div>",
+        wrapper_class(mode)
+    );
 
     let selection = select_assets(&wrapped, &config.render_options);
 
@@ -97,7 +110,6 @@ pub fn render(
         .iter()
         .map(|name| Script::Src(format!("/assets/{name}")))
         .collect();
-    scripts.push(Script::Inline(format!("var MUDL_VERSION = {version};")));
     scripts.push(Script::Src("/assets/live-reload.js".to_string()));
 
     let doc = HtmlDocument {
@@ -110,7 +122,11 @@ pub fn render(
             "http:".to_string(),
             "data:".to_string(),
         ],
-        csp_script_src: vec!["'self'".to_string(), "'unsafe-inline'".to_string()],
+        // No `'unsafe-inline'` (`docs/SECURITY.md` Finding 3): every script
+        // this page runs is loaded from `/assets/`, and the live-reload
+        // version it used to need an inline bootstrap for now travels as
+        // the `data-mudl-version` attribute set above instead.
+        csp_script_src: vec!["'self'".to_string()],
         html_classes: html_classes(config),
         zoom_level: match mode {
             Mode::Up => config.up_zoom,
@@ -119,7 +135,7 @@ pub fn render(
         body_content: wrapped,
         body_scripts: scripts,
     };
-    doc.render()
+    (doc.render(), allowed_local_paths)
 }
 
 /// The `<html>` root classes matching Phase 10.4's toggle-button state,
@@ -164,7 +180,7 @@ mod tests {
 
     #[test]
     fn up_mode_wraps_body_and_includes_up_mode_script() {
-        let html = render(
+        let (html, _) = render(
             "# Hello",
             base_dir(),
             "notes.md",
@@ -181,7 +197,7 @@ mod tests {
 
     #[test]
     fn down_mode_wraps_body_and_includes_down_mode_script() {
-        let html = render(
+        let (html, _) = render(
             "line one",
             base_dir(),
             "notes.md",
@@ -197,7 +213,7 @@ mod tests {
 
     #[test]
     fn title_is_used_as_document_title() {
-        let html = render(
+        let (html, _) = render(
             "hi",
             base_dir(),
             "my-notes.md",
@@ -210,7 +226,7 @@ mod tests {
 
     #[test]
     fn theme_css_content_is_embedded() {
-        let html = render(
+        let (html, _) = render(
             "hi",
             base_dir(),
             "notes.md",
@@ -223,7 +239,7 @@ mod tests {
 
     #[test]
     fn version_is_embedded_for_live_reload() {
-        let html = render(
+        let (html, _) = render(
             "hi",
             base_dir(),
             "notes.md",
@@ -231,13 +247,13 @@ mod tests {
             42,
             &DocumentConfig::default(),
         );
-        assert!(html.contains("var MUDL_VERSION = 42;"));
+        assert!(html.contains("data-mudl-version=\"42\""));
         assert!(html.contains("/assets/live-reload.js"));
     }
 
     #[test]
     fn local_image_src_is_rewritten_through_local_route() {
-        let html = render(
+        let (html, _) = render(
             "![alt](photo.png)",
             base_dir(),
             "notes.md",
@@ -249,8 +265,34 @@ mod tests {
     }
 
     #[test]
+    fn local_image_path_is_reported_in_allowed_local_paths() {
+        let (_, allowed_local_paths) = render(
+            "![alt](photo.png)",
+            base_dir(),
+            "notes.md",
+            Mode::Up,
+            0,
+            &DocumentConfig::default(),
+        );
+        assert_eq!(allowed_local_paths, vec![Path::new("/docs/photo.png")]);
+    }
+
+    #[test]
+    fn no_images_reports_no_allowed_local_paths() {
+        let (_, allowed_local_paths) = render(
+            "hi",
+            base_dir(),
+            "notes.md",
+            Mode::Up,
+            0,
+            &DocumentConfig::default(),
+        );
+        assert!(allowed_local_paths.is_empty());
+    }
+
+    #[test]
     fn local_markdown_link_is_rewritten_through_local_md_route() {
-        let html = render(
+        let (html, _) = render(
             "[stub](./stub.md)",
             base_dir(),
             "notes.md",
@@ -263,7 +305,7 @@ mod tests {
 
     #[test]
     fn other_local_file_link_is_rewritten_through_local_file_route() {
-        let html = render(
+        let (html, _) = render(
             "[text](./example.txt)",
             base_dir(),
             "notes.md",
@@ -276,7 +318,7 @@ mod tests {
 
     #[test]
     fn anchor_link_is_left_unrewritten() {
-        let html = render(
+        let (html, _) = render(
             "[jump](#section)",
             base_dir(),
             "notes.md",
@@ -289,7 +331,7 @@ mod tests {
 
     #[test]
     fn code_fence_selects_highlight_assets() {
-        let html = render(
+        let (html, _) = render(
             "```rust\nfn main() {}\n```",
             base_dir(),
             "notes.md",
@@ -308,8 +350,8 @@ mod tests {
             down_zoom: 0.8,
             ..DocumentConfig::default()
         };
-        let up_html = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config);
-        let down_html = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
+        let (up_html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config);
+        let (down_html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
         assert!(up_html.contains("style=\"zoom: 1.5\""));
         assert!(down_html.contains("style=\"zoom: 0.8\""));
     }
@@ -326,7 +368,7 @@ mod tests {
 
     #[test]
     fn default_config_html_classes_match_default_preferences() {
-        let html = render(
+        let (html, _) = render(
             "hi",
             base_dir(),
             "notes.md",
@@ -346,7 +388,7 @@ mod tests {
             readable_column: true,
             ..DocumentConfig::default()
         };
-        let html = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
+        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
         let classes = html_root_class_attr(&html);
         assert_eq!(classes, "is-readable-column");
     }

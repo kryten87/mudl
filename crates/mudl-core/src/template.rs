@@ -5,7 +5,8 @@
 //! builder rather than a line-for-line translation — see `HtmlDocument`'s doc
 //! comment and `Script` below for where this deliberately diverges.
 
-use std::path::Path;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 
 use crate::encoding::html_escape;
 use crate::images::is_external_source;
@@ -278,6 +279,29 @@ pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection
 /// behavior), then percent-encoded and rewritten to `/local/<encoded>`.
 pub fn rewrite_local_image_srcs(html: &str, base_dir: &Path) -> String {
     rewrite_img_srcs(html, &|src| rewrite_src(src, base_dir))
+}
+
+/// Like [`rewrite_local_image_srcs`], but also returns the resolved,
+/// absolute local paths every non-external `src` was rewritten to.
+///
+/// This is the exact set of paths a document legitimately needs served
+/// through `/local/<path>` — `mudl-server`'s `DocumentSource` records it at
+/// render time and confines `Route::LocalFile` to it, closing the arbitrary
+/// local file read described in `docs/SECURITY.md` Finding 2 (previously
+/// `serve_local_file` would read and return *any* path a request named,
+/// with no relation to the document being viewed).
+pub fn rewrite_local_image_srcs_with_paths(html: &str, base_dir: &Path) -> (String, Vec<PathBuf>) {
+    let paths = RefCell::new(Vec::new());
+    let rewritten = rewrite_img_srcs(html, &|src| {
+        if is_external_source(src) {
+            return src.to_string();
+        }
+        let resolved = base_dir.join(src);
+        let rewritten_src = format!("/local/{}", percent_encode(&resolved.to_string_lossy()));
+        paths.borrow_mut().push(resolved);
+        rewritten_src
+    });
+    (rewritten, paths.into_inner())
 }
 
 /// The shared `<img src="...">` text scanner behind [`rewrite_local_image_srcs`]
@@ -976,6 +1000,39 @@ mod rewrite_local_image_srcs_tests {
             rewrite_local_image_srcs(html, base),
             "<img src=\"/local//absolute/photo.png\">"
         );
+    }
+}
+
+#[cfg(test)]
+mod rewrite_local_image_srcs_with_paths_tests {
+    use super::rewrite_local_image_srcs_with_paths;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn collects_resolved_paths_for_local_srcs() {
+        let base = Path::new("/base/dir");
+        let html = r#"<p><img src="a.png"> <img src="b.png"></p>"#;
+        let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base);
+        assert_eq!(
+            rewritten,
+            "<p><img src=\"/local//base/dir/a.png\"> <img src=\"/local//base/dir/b.png\"></p>"
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/base/dir/a.png"),
+                PathBuf::from("/base/dir/b.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn external_srcs_contribute_no_paths() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="https://example.com/photo.png">"#;
+        let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base);
+        assert_eq!(rewritten, html);
+        assert!(paths.is_empty());
     }
 }
 

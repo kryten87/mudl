@@ -24,6 +24,7 @@ use crate::encoding::html_escape;
 use crate::footnotes::is_comment_label;
 use crate::frontmatter::{self, parse_top_level_keys};
 use crate::frontmatter_html::render_table as render_frontmatter_table;
+use crate::html_sanitize::{is_safe_url, sanitize_html};
 use crate::options::RenderOptions;
 use crate::parse::ParsedMarkdown;
 use crate::slug::Tracker;
@@ -514,7 +515,7 @@ impl<'a> Renderer<'a> {
                 }
             }
             Event::InlineHtml(s) => {
-                self.out.push_str(&s);
+                self.out.push_str(&sanitize_html(&s));
             }
             Event::SoftBreak => self.out.push('\n'),
             Event::HardBreak => self.out.push_str("<br />\n"),
@@ -692,11 +693,11 @@ impl<'a> Renderer<'a> {
     }
 
     fn render_html_block(&mut self) {
+        let mut block = String::new();
         loop {
             match self.current() {
                 Some(Event::Html(s)) => {
-                    let s = s.to_string();
-                    self.out.push_str(&s);
+                    block.push_str(s);
                     self.pos += 1;
                 }
                 Some(Event::End(TagEnd::HtmlBlock)) => {
@@ -707,6 +708,7 @@ impl<'a> Renderer<'a> {
                 None => break,
             }
         }
+        self.out.push_str(&sanitize_html(&block));
     }
 
     // MARK: - Lists
@@ -792,6 +794,14 @@ impl<'a> Renderer<'a> {
             format!("mailto:{dest_url}")
         } else {
             dest_url.to_string()
+        };
+        // `docs/SECURITY.md` Finding 3: a link destination is HTML-escaped
+        // below, but escaping doesn't touch its scheme — a `javascript:`
+        // URL survives untouched otherwise and runs on click.
+        let href = if is_safe_url(&href) {
+            href
+        } else {
+            "#".to_string()
         };
         self.out.push_str("<a href=\"");
         self.out.push_str(&html_escape(&href));

@@ -10,8 +10,11 @@
 //! span is never clobbered; the caller's file watcher (Phase 6) picks up
 //! the write like any other external change.
 
-use std::io;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::anchor;
 use crate::document;
@@ -31,11 +34,21 @@ pub trait FileSystem: Send + Sync {
 }
 
 /// A thin wrapper over `std::fs`: writes to a sibling temp file, then
-/// `rename`s it into place (a rename within the same directory is atomic on
-/// Linux). The temp name *appends* `.tmp` to the full file name (rather
-/// than replacing the extension) so two differently-extensioned files
-/// sharing a base name -- `notes.md` and `notes.txt` -- can never collide
-/// on the same temp path.
+/// `rename`s it over the real target (a rename within the same directory is
+/// atomic on Linux).
+///
+/// - The target is resolved through symlinks first ([`resolve_symlink`]), so
+///   replacing a symlinked document replaces what it points to, rather than
+///   clobbering the link itself.
+/// - The temp file is created with `O_EXCL` (`create_new`), so a symlink an
+///   attacker pre-placed at the temp path is refused, not followed.
+/// - The temp name carries a random suffix ([`sibling_tmp_path`]) on top of
+///   that, so the name can't be guessed and raced in the first place, and two
+///   differently-extensioned files sharing a base name -- `notes.md` and
+///   `notes.txt` -- can never collide on the same temp path.
+/// - The original file's permissions (if it exists) are restored on the
+///   replacement, so a note chmodded to 0600 doesn't become world-readable
+///   the first time a comment is added to it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealFileSystem;
 
@@ -45,12 +58,51 @@ impl FileSystem for RealFileSystem {
     }
 
     fn write_atomic(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
-        let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-        tmp_name.push(".tmp");
-        let tmp_path = path.with_file_name(tmp_name);
-        std::fs::write(&tmp_path, contents)?;
-        std::fs::rename(&tmp_path, path)
+        let real_path = resolve_symlink(path);
+        let existing_permissions = std::fs::metadata(&real_path).ok().map(|m| m.permissions());
+
+        let tmp_path = sibling_tmp_path(&real_path);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+
+        if let Some(permissions) = existing_permissions {
+            std::fs::set_permissions(&tmp_path, permissions)?;
+        }
+
+        std::fs::rename(&tmp_path, &real_path)
     }
+}
+
+/// Follows `path` through symlinks to the file that would actually receive
+/// the write. Falls back to `path` unchanged when it doesn't exist yet or
+/// isn't a symlink -- `canonicalize` requires every component to exist.
+fn resolve_symlink(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A sibling of `path` with an unpredictable suffix, for use as a `create_new`
+/// temp file target.
+fn sibling_tmp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(
+        ".tmp-{:x}-{:x}-{:x}",
+        std::process::id(),
+        nanos,
+        counter
+    ));
+    path.with_file_name(tmp_name)
 }
 
 /// Why a comment mutation failed. The two causes look identical to the user
@@ -434,5 +486,54 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn real_file_system_write_atomic_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mudl-comments-write-perms-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.md");
+        std::fs::write(&path, "Original.\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let real = RealFileSystem;
+        real.write_atomic(&path, b"Rewritten.\n").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn real_file_system_write_atomic_follows_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "mudl-comments-write-symlink-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_path = dir.join("real-doc.md");
+        let link_path = dir.join("doc.md");
+        std::fs::write(&real_path, "Original.\n").unwrap();
+        symlink(&real_path, &link_path).unwrap();
+
+        let real = RealFileSystem;
+        real.write_atomic(&link_path, b"Rewritten.\n").unwrap();
+
+        let link_is_still_a_symlink = std::fs::symlink_metadata(&link_path)
+            .unwrap()
+            .file_type()
+            .is_symlink();
+        let target_contents = std::fs::read_to_string(&real_path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(link_is_still_a_symlink);
+        assert_eq!(target_contents, "Rewritten.\n");
     }
 }

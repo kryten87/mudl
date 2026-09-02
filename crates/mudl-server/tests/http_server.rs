@@ -148,12 +148,18 @@ fn document_route_renders_the_configured_file() {
 }
 
 #[test]
-fn local_file_route_serves_bytes_present_in_the_filesystem() {
+fn local_file_route_serves_bytes_present_in_the_filesystem_and_referenced_by_the_document() {
     let filesystem = InMemoryFileSystem::new();
-    filesystem.insert("/tmp/notes/photo.png", b"fake-png-bytes".to_vec());
+    filesystem.insert(DOCUMENT_PATH, b"![alt](photo.png)".to_vec());
+    filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
     let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
 
-    let response = get(addr, "/local/%2Ftmp%2Fnotes%2Fphoto.png");
+    // The document has to be rendered at least once before its allowlist
+    // (the set of local paths its own images resolved to) is populated —
+    // exactly what a real WebView does by loading `/` before requesting
+    // any `/local/` image it found there.
+    get(addr, "/");
+    let response = get(addr, "/local/%2Fdocs%2Fphoto.png");
     let (head, body) = split_head_and_body(&response);
 
     assert!(head.starts_with("HTTP/1.1 200 OK"));
@@ -163,9 +169,31 @@ fn local_file_route_serves_bytes_present_in_the_filesystem() {
 
 #[test]
 fn local_file_route_missing_from_filesystem_is_404() {
-    let (addr, _version) = start_server();
+    let filesystem = InMemoryFileSystem::new();
+    filesystem.insert(DOCUMENT_PATH, b"![alt](missing.md)".to_vec());
+    let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
 
-    let response = get(addr, "/local/%2Ftmp%2Fmissing.md");
+    get(addr, "/");
+    let response = get(addr, "/local/%2Fdocs%2Fmissing.md");
+    let (head, _body) = split_head_and_body(&response);
+
+    assert!(head.starts_with("HTTP/1.1 404 Not Found"));
+}
+
+#[test]
+fn local_file_route_not_referenced_by_the_document_is_404_even_when_present_on_disk() {
+    // Regression test for `docs/SECURITY.md` Finding 2: `/local/<path>`
+    // used to serve any readable path a request named, letting any local
+    // process (or a DNS-rebound web page) read arbitrary files such as
+    // `~/.ssh/id_rsa`. It must now be confined to paths the document
+    // itself referenced.
+    let filesystem = InMemoryFileSystem::new();
+    filesystem.insert(DOCUMENT_PATH, b"no images here".to_vec());
+    filesystem.insert("/etc/passwd", b"root:x:0:0::/root:/bin/bash".to_vec());
+    let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
+
+    get(addr, "/");
+    let response = get(addr, "/local/%2Fetc%2Fpasswd");
     let (head, _body) = split_head_and_body(&response);
 
     assert!(head.starts_with("HTTP/1.1 404 Not Found"));
