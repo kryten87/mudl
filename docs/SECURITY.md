@@ -43,7 +43,25 @@ from contained to unconfined.
 
 ## 2. Arbitrary local file read over the HTTP server
 
-**Severity: critical.** Verified against a live server instance.
+**Severity: critical. Fixed.** Verified against a live server instance
+prior to the fix.
+
+`DocumentSource` now records the exact set of local paths each render of
+the document resolved (`rewrite_local_image_srcs_with_paths` in
+`crates/mudl-core/src/template.rs`), and `serve_local_file`
+(`crates/mudl-server/src/server.rs`) refuses any `/local/<path>` request
+whose path isn't in that set, before it ever reaches the `FileSystem`. A
+request for `/local/%2Fetc%2Fpasswd` — or any other path the open document
+didn't itself embed as an image — now gets the same 404 as a path that
+doesn't exist, whether or not the file is actually present and readable.
+The remaining two hardening steps from the original write-up (a per-instance
+token in the `/local/` path, and rejecting requests with an unexpected
+`Host` header) are not yet implemented; they would still be worth doing to
+close the port-scanning and DNS-rebinding vectors against this and the
+other routes.
+
+The description below is preserved as the original record of what was
+found.
 
 `crates/mudl-server/src/routes.rs` maps `/local/<percent-encoded-path>` to
 `Route::LocalFile`, and `serve_local_file` in
