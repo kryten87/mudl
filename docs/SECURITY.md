@@ -120,8 +120,32 @@ free-form paths. Two further hardening steps, cheap and independent:
 
 ## 3. Script execution from document content
 
-**Severity: critical.** Chains with Finding 2. Verified through the CLI
-and against the served page.
+**Severity: critical. Fixed** (the `script-src 'unsafe-inline'` and raw-HTML/
+link-scheme pieces below; `img-src` is unchanged — see Finding 4, still
+open). Verified against a live server instance and the CLI prior to the
+fix.
+
+`crate::html_sanitize::sanitize_html` (`crates/mudl-core/src/html_sanitize.rs`)
+now runs over both raw-HTML pass-through sites in
+`crates/mudl-core/src/render.rs` — `render_leaf`'s `Event::InlineHtml` arm
+and `render_html_block`'s buffered `Event::Html` — dropping `<script>`,
+`<iframe>`, `<object>`, and `<embed>` elements entirely (open tag, content,
+and matching close tag), stripping every `on*` attribute from what's left,
+and dropping any `href`/`src` attribute whose value isn't `http:`, `https:`,
+`mailto:`, or scheme-less (`crate::html_sanitize::is_safe_url`). The same
+`is_safe_url` check now gates `render_link`'s `href` (Markdown link syntax,
+not just raw HTML), replacing a disallowed scheme with `#` — this is what
+closes the `javascript:` link case, since that reaches the page through
+`Tag::Link`, not raw HTML.
+
+`crates/mudl-server/src/document.rs`'s `csp_script_src` is now `'self'`
+only. The live-reload bootstrap that needed `'unsafe-inline'` for its
+one-line `var MUDL_VERSION = N;` script now reads a `data-mudl-version`
+attribute on the mode wrapper `<div>` instead (`resources/js/live-reload.js`),
+so no inline script remains anywhere in the served page.
+
+The description and reproduction below are preserved as the original
+record of what was found.
 
 Raw HTML in a Markdown document passes through the renderer verbatim:
 `Event::InlineHtml` is pushed unescaped in `render_leaf`, and

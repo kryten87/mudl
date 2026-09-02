@@ -85,7 +85,13 @@ pub fn render(
     };
     let (body, allowed_local_paths) = rewrite_local_image_srcs_with_paths(&body, base_dir);
     let body = rewrite_local_link_hrefs(&body, base_dir);
-    let wrapped = format!("<div class=\"{}\">{body}</div>", wrapper_class(mode));
+    // `data-mudl-version` carries the live-reload baseline to
+    // `live-reload.js` without an inline `<script>` — see the
+    // `csp_script_src` comment below.
+    let wrapped = format!(
+        "<div class=\"{}\" data-mudl-version=\"{version}\">{body}</div>",
+        wrapper_class(mode)
+    );
 
     let selection = select_assets(&wrapped, &config.render_options);
 
@@ -104,7 +110,6 @@ pub fn render(
         .iter()
         .map(|name| Script::Src(format!("/assets/{name}")))
         .collect();
-    scripts.push(Script::Inline(format!("var MUDL_VERSION = {version};")));
     scripts.push(Script::Src("/assets/live-reload.js".to_string()));
 
     let doc = HtmlDocument {
@@ -117,7 +122,11 @@ pub fn render(
             "http:".to_string(),
             "data:".to_string(),
         ],
-        csp_script_src: vec!["'self'".to_string(), "'unsafe-inline'".to_string()],
+        // No `'unsafe-inline'` (`docs/SECURITY.md` Finding 3): every script
+        // this page runs is loaded from `/assets/`, and the live-reload
+        // version it used to need an inline bootstrap for now travels as
+        // the `data-mudl-version` attribute set above instead.
+        csp_script_src: vec!["'self'".to_string()],
         html_classes: html_classes(config),
         zoom_level: match mode {
             Mode::Up => config.up_zoom,
@@ -238,7 +247,7 @@ mod tests {
             42,
             &DocumentConfig::default(),
         );
-        assert!(html.contains("var MUDL_VERSION = 42;"));
+        assert!(html.contains("data-mudl-version=\"42\""));
         assert!(html.contains("/assets/live-reload.js"));
     }
 

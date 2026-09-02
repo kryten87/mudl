@@ -64,9 +64,10 @@ pub const HIGHLIGHT_INIT_JS: &str = include_str!("../../../resources/js/highligh
 pub const MATH_INIT_JS: &str = include_str!("../../../resources/js/math-init.js");
 /// Runs `mermaid.min.js` over Up mode's ` ```mermaid ` blocks.
 pub const MERMAID_INIT_JS: &str = include_str!("../../../resources/js/mermaid-init.js");
-/// The live-reload long-poll client (implementation plan §2); expects a
-/// preceding inline `var MUDL_VERSION = N;` script to set its starting
-/// version.
+/// The live-reload long-poll client (implementation plan §2); reads its
+/// starting version from the served page's `data-mudl-version` attribute
+/// rather than an inline `<script>` (`docs/SECURITY.md` Finding 3 — the
+/// page's `script-src` CSP no longer allows `'unsafe-inline'`).
 pub const LIVE_RELOAD_JS: &str = include_str!("../../../resources/js/live-reload.js");
 
 #[cfg(test)]

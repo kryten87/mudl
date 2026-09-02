@@ -8,6 +8,7 @@ pub mod footnotes;
 pub mod frontmatter;
 pub mod frontmatter_html;
 pub mod headings;
+pub mod html_sanitize;
 pub mod images;
 pub mod options;
 pub mod outline;
