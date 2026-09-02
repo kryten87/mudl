@@ -292,7 +292,40 @@ when the repository's `.git/config` sets any command-valued key.
 
 ## 7. Atomic writes drop permissions and follow symlinks
 
-**Severity: low-medium.**
+**Severity: low-medium. Fixed.**
+
+Both `write_atomic` implementations — `crates/mudl-comments/src/write.rs`
+and `crates/mudl-config/src/io.rs` — now resolve the target through
+symlinks first (`resolve_symlink`, via `std::fs::canonicalize`), create the
+temp file with `O_EXCL` (`OpenOptions::create_new`) under a name carrying a
+random suffix (`sibling_tmp_path`: PID, nanosecond timestamp, and an
+in-process counter) rather than a fixed `<name>.tmp`, and restore the
+original file's permissions on the replacement before the `rename`. This
+closes all three original issues:
+
+- **Permissions** are now read via `std::fs::metadata` before the write and
+  re-applied via `std::fs::set_permissions` on the temp file, so a note
+  chmodded to 0600 stays 0600 after a comment is added.
+- **Symlinks** are followed to their real target before the temp path is
+  chosen and the rename lands on the target, not the link, so a symlinked
+  document keeps its link.
+- **The temp name** is no longer predictable, and `O_EXCL` independently
+  refuses to follow a symlink an attacker pre-placed at the guessed name
+  (Linux `open` with `O_CREAT|O_EXCL` fails with `EEXIST` on an existing
+  path — including a symlink — rather than dereferencing it), closing the
+  shared-writable-directory arbitrary-file-write vector.
+
+Ownership (as opposed to mode) is not restored — restoring it generally
+requires `CAP_CHOWN`, which the invoking user's own process doesn't have,
+and the common case is a file already owned by that same user.
+
+New tests (`real_file_system_write_atomic_preserves_permissions`,
+`real_file_system_write_atomic_follows_symlink` in `mudl-comments`, and
+the `real_fs_write_atomic_*` equivalents in `mudl-config`) cover both
+behaviors against the real filesystem.
+
+The description below is preserved as the original record of what was
+found.
 
 Both `write_atomic` implementations — `crates/mudl-comments/src/write.rs`
 and `crates/mudl-config/src/io.rs` — write a sibling temp file with
