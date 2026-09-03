@@ -515,6 +515,9 @@ fn build_tab(
         prefs_path: prefs_path.to_path_buf(),
         document,
         addr,
+        // Always starts off — see `toolbar::Context::allow_remote_images`'s
+        // doc comment on why this can't be a persisted preference.
+        allow_remote_images: Rc::new(Cell::new(false)),
     };
     let toolbar_widget = toolbar::build(&toolbar_ctx);
 
