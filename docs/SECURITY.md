@@ -254,6 +254,15 @@ with it off; there's no config path that carries a document's opt-in over
 to the next one, whether that's the same file reopened or a different
 file entirely.
 
+A blocked remote image no longer falls back to the browser's bare
+alt-text rendering, which gave no hint that anything had been hidden:
+`resources/js/mud.js` swaps it for a `.mud-blocked-image` placeholder
+naming the "Show External Images" menu item, decided from the page's own
+CSP `<meta>` tag rather than the browser's `error` event alone (a
+same-URL image the reader had previously allowed could otherwise be
+served from WebKit's cache with no fresh request and no `error` event on
+a later reload with the setting off again).
+
 The description below is preserved as the original record of what was
 found.
 
