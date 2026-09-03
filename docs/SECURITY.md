@@ -22,7 +22,7 @@ Current status:
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
 | 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal) |
 | 7 | Atomic writes drop permissions and follow symlinks | low-medium | **Fixed** |
-| 8 | Smaller items | — | Two fixed, two open, one partly fixed |
+| 8 | Smaller items | — | Three fixed, one open, one partly fixed |
 
 
 ## 1. Threat model
@@ -410,11 +410,10 @@ through symlinks before deciding where the temp file goes.
   serve as scriptable same-origin content. Covered by
   `unrecognized_extension_is_rewritten_but_not_allowlisted` in
   `template.rs`.
-- **`html_escape` doesn't escape `'` — open.**
-  (`crates/mudl-core/src/encoding.rs`; `encoding.rs:72` still asserts `'`
-  passes through). Safe today only because every attribute this codebase
-  emits is double-quoted; it's a trap for whoever adds the first
-  single-quoted one. Add `&#39;`.
+- **`html_escape` doesn't escape `'` — fixed.**
+  (`crates/mudl-core/src/encoding.rs`). `'` now maps to `&#39;`, the same
+  as the other three specials; `all_five_specials` in `encoding.rs`
+  covers it.
 - **CLI output is an unsanitized fragment — mostly fixed.** Finding 3's
   sanitizing lives in `render.rs`, which `render_one`
   (`crates/mudl-cli/src/main.rs:189`) goes through, so the stored-XSS half
