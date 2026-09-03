@@ -1,10 +1,9 @@
-//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`): now just the
-//! "Changes since…" popover. Zoom, Readable Column, Line Numbers, Word
-//! Wrap, and the theme picker all moved to the Phase 15 menu bar's
-//! View/Theme menus — the toolbar controls for them were redundant with
-//! the menu items and have been removed; `set_zoom`/`step_zoom`/
-//! `set_readable_column`/`set_line_numbers`/`set_word_wrap`/`set_theme`
-//! below are what the menu calls directly.
+//! Toolbar (Phase 10.4 of `docs/IMPLEMENTATION-PLAN.md`). Zoom, Readable
+//! Column, Line Numbers, Word Wrap, and the theme picker all moved to the
+//! Phase 15 menu bar's View/Theme menus — the toolbar controls for them
+//! were redundant with the menu items and have been removed;
+//! `set_zoom`/`step_zoom`/`set_readable_column`/`set_line_numbers`/
+//! `set_word_wrap`/`set_theme` below are what the menu calls directly.
 //!
 //! Every control keeps three things in lockstep: the live WebView (via
 //! `WebView::set_zoom_level` for zoom, or a small injected script for the
@@ -20,14 +19,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gtk::prelude::*;
 use webkit2gtk::WebViewExt;
 
 use mudl_config::{Preferences, Theme};
 use mudl_server::routes::Mode;
 use mudl_server::server::DocumentSource;
 
-use crate::changes;
 use crate::config;
 
 /// The step `step_zoom` moves by — reused by the Phase 15 menu's Zoom
@@ -47,10 +44,6 @@ pub struct Context {
     pub prefs_path: PathBuf,
     pub document: Arc<DocumentSource>,
     pub addr: SocketAddr,
-    /// The Phase 13.9 "Changes" sidebar pane's list view, when the tab was
-    /// built with `sidebar_pane = changes` — `None` in outline mode, where
-    /// there's no group list to refresh after a waypoint pick.
-    pub changes_list: Option<gtk::TreeView>,
 }
 
 impl Context {
@@ -66,84 +59,25 @@ impl Context {
     }
 
     fn document_url(&self) -> String {
-        changes::document_url(self.addr, self.mode.get(), None)
+        document_url(self.addr, self.mode.get())
     }
 }
 
-/// Builds the toolbar widget and wires every control's signal handler.
-pub fn build(ctx: &Context) -> gtk::Box {
-    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-
-    let changes_button = gtk::MenuButton::new();
-    changes_button.set_label("Changes since…");
-    // GTK's GtkMenuButton disables itself when it has no `popover`/
-    // `menu-model` property attached, which this button never gets: the
-    // popover it shows is rebuilt fresh with live git data on every click
-    // (`connect_changes_button` below) and shown imperatively via
-    // `popover.popup()` rather than via the `popover` property, so GTK's
-    // own sensitivity bookkeeping never sees one and leaves the button
-    // permanently disabled unless overridden here.
-    changes_button.set_sensitive(true);
-    connect_changes_button(&changes_button, ctx);
-    toolbar.pack_start(&changes_button, false, false, 4);
-
-    toolbar
+/// The `http://<addr>/...` URL for `mode` — `?mode=down` for Down mode, no
+/// query string at all for Up mode (plain `/` already means Up mode).
+pub fn document_url(addr: SocketAddr, mode: Mode) -> String {
+    match mode {
+        Mode::Up => format!("http://{addr}/"),
+        Mode::Down => format!("http://{addr}/?mode=down"),
+    }
 }
 
-/// Wires the "Changes since…" button: on click, queries the file's git
-/// history fresh (matching every other control here reading live state
-/// rather than a cached snapshot) and pops up `changes::build_popover`
-/// anchored to the button. Picking a row re-navigates the WebView with
-/// `?waypoint=<index>`, so `mudl-server`'s `serve_document` overlays that
-/// diff on the next render.
-fn connect_changes_button(button: &gtk::MenuButton, ctx: &Context) {
-    let ctx = ctx.clone();
-    let button_for_handler = button.clone();
-    button.connect_clicked(move |_| {
-        let current_content = std::fs::read_to_string(&ctx.document.path).unwrap_or_default();
-        let candidates = mudl_diff::git::query_waypoints(
-            &mudl_diff::git::RealGitRunner,
-            &ctx.document.path,
-            &current_content,
-        );
-
-        let ctx_for_select = ctx.clone();
-        let current_content_for_select = current_content.clone();
-        let candidates_for_select = candidates.clone();
-        let popover = changes::build_popover(&candidates, move |index| {
-            let url =
-                changes::document_url(ctx_for_select.addr, ctx_for_select.mode.get(), Some(index));
-            ctx_for_select.webview.load_uri(&url);
-
-            if let Some(list_view) = &ctx_for_select.changes_list {
-                if let Some(candidate) = candidates_for_select.get(index) {
-                    refresh_changes_list(
-                        list_view,
-                        &current_content_for_select,
-                        &candidate.content,
-                    );
-                }
-            }
-        });
-        popover.set_relative_to(Some(&button_for_handler));
-        popover.popup();
-    });
-}
-
-/// Recomputes the block-level `ChangePlan` for `old`/`new` (stripping
-/// frontmatter the same way `render_up` does, so group IDs match what
-/// actually ends up in the rendered DOM) and repopulates the "Changes"
-/// sidebar pane with its groups.
-fn refresh_changes_list(list_view: &gtk::TreeView, old: &str, new: &str) {
-    let old_body = mudl_core::frontmatter::extract(old)
-        .map(|fm| fm.body)
-        .unwrap_or_else(|| old.to_string());
-    let new_body = mudl_core::frontmatter::extract(new)
-        .map(|fm| fm.body)
-        .unwrap_or_else(|| new.to_string());
-    let plan = mudl_core::changes::up_change_plan(&old_body, &new_body, 0.25);
-    let summaries = mudl_core::changes::group_summaries(&plan);
-    crate::sidebar::populate_changes_list(list_view, &summaries);
+/// Builds the toolbar widget. Every control that used to live here (Zoom,
+/// Readable Column, Line Numbers, Word Wrap, the theme picker) has moved to
+/// the Phase 15 menu bar — see the module doc comment — leaving nothing to
+/// pack into the returned box today.
+pub fn build(_ctx: &Context) -> gtk::Box {
+    gtk::Box::new(gtk::Orientation::Horizontal, 4)
 }
 
 /// Sets the theme preference and applies it live. Used by the menu's Theme
@@ -227,4 +161,26 @@ fn toggle_root_class(webview: &webkit2gtk::WebView, class: &str, add: bool) {
         format!("document.documentElement.classList.remove(\"{class}\");")
     };
     webview.evaluate_javascript(&script, None, None, None::<&gtk::gio::Cancellable>, |_| {});
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr() -> SocketAddr {
+        "127.0.0.1:53211".parse().unwrap()
+    }
+
+    #[test]
+    fn up_mode_is_plain_root() {
+        assert_eq!(document_url(addr(), Mode::Up), "http://127.0.0.1:53211/");
+    }
+
+    #[test]
+    fn down_mode_has_mode_query() {
+        assert_eq!(
+            document_url(addr(), Mode::Down),
+            "http://127.0.0.1:53211/?mode=down"
+        );
+    }
 }

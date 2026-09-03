@@ -36,16 +36,13 @@ pub fn footnotes_section(
         return String::new();
     }
 
-    let mut inner_options = options.clone();
-    inner_options.waypoint = None;
-
     let mut html = String::from("<section class=\"footnotes\">\n<ol>\n");
     for (number, entry) in numbered {
         let label = html_escape(&entry.label);
         html.push_str(&format!(
             "<li id=\"fn-{label}\" data-mud-footnote-number=\"{number}\">\n"
         ));
-        html.push_str(&render_up(&entry.body_markdown, &inner_options));
+        html.push_str(&render_up(&entry.body_markdown, options));
         html.push_str(&format!(
             "<a class=\"footnote-backref\" href=\"#fnref-{label}\" aria-label=\"Back to content\">\u{21A9}</a>\n"
         ));
@@ -65,13 +62,10 @@ pub fn comments_section(body: &str, options: &RenderOptions) -> String {
         return String::new();
     }
 
-    let mut inner_options = options.clone();
-    inner_options.waypoint = None;
-
     let mut html =
         String::from("<footer class=\"comments\" data-comments>\n<h2>Comments</h2>\n<ol>\n");
     for comment in &comments {
-        html.push_str(&comment_list_item(comment, &inner_options));
+        html.push_str(&comment_list_item(comment, options));
     }
     html.push_str("</ol>\n</footer>");
     html

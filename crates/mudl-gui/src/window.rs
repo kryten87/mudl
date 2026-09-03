@@ -458,22 +458,11 @@ fn build_tab(
     connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
     connect_link_navigation(&webview, addr, Rc::clone(registry));
 
-    // Phase 13.9/14.7: the "Changes" and "Comments" sidebar panes are each
-    // an alternative to the outline pane (Appendix B's `sidebarPane`
-    // preference), not a second widget alongside it — one `gtk::Paned`
-    // slot, like the outline pane always had. `changes_list` is `None`
-    // outside changes mode; the toolbar's "Changes since…" popover still
-    // overlays the diff in the WebView either way, it just has nowhere to
-    // also list the change groups.
+    // Phase 14.7: the "Comments" sidebar pane is an alternative to the
+    // outline pane (Appendix B's `sidebarPane` preference), not a second
+    // widget alongside it — one `gtk::Paned` slot, like the outline pane
+    // always had.
     let sidebar_pane = prefs.borrow().sidebar_pane;
-
-    let changes_list = if sidebar_pane == mudl_config::SidebarPane::Changes {
-        let list_view = sidebar::build_changes_list_view();
-        connect_changes_navigation(&list_view, &webview);
-        Some(list_view)
-    } else {
-        None
-    };
 
     let sidebar_scroller =
         gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
@@ -483,12 +472,9 @@ fn build_tab(
     // state a freshly-opened tab starts from.
     sidebar_scroller.set_visible(prefs.borrow().sidebar_enabled);
     match sidebar_pane {
-        mudl_config::SidebarPane::Changes => {
-            sidebar_scroller.add(changes_list.as_ref().unwrap());
-        }
         mudl_config::SidebarPane::Comments => {
-            // Unlike Outline/Changes (a single `TreeView` that overflows
-            // into `sidebar_scroller`'s own scrollbar), the Comments pane
+            // Unlike Outline (a single `TreeView` that overflows into
+            // `sidebar_scroller`'s own scrollbar), the Comments pane
             // is itself a column (list + compose box below it), so it
             // manages its own scrolling for just the list and packs
             // directly into the outer scroller's viewport rather than
@@ -529,7 +515,6 @@ fn build_tab(
         prefs_path: prefs_path.to_path_buf(),
         document,
         addr,
-        changes_list,
     };
     let toolbar_widget = toolbar::build(&toolbar_ctx);
 
@@ -785,23 +770,6 @@ fn connect_sidebar_navigation(
     });
 }
 
-/// Row activation in the Phase 13.9 "Changes" sidebar pane: reads the
-/// activated row's group ID back out of the list store and runs
-/// `sidebar::changes_navigation_script` in the WebView to jump there.
-fn connect_changes_navigation(tree_view: &gtk::TreeView, webview: &webkit2gtk::WebView) {
-    let webview = webview.clone();
-    tree_view.connect_row_activated(move |tree_view, path, _column| {
-        let Some(model) = tree_view.model().and_downcast::<gtk::ListStore>() else {
-            return;
-        };
-        let Some(group_id) = sidebar::group_id_at(&model, path) else {
-            return;
-        };
-        let script = sidebar::changes_navigation_script(&group_id);
-        webview.evaluate_javascript(&script, None, None, None::<&gtk::gio::Cancellable>, |_| {});
-    });
-}
-
 /// Row activation in the Phase 14.7 "Comments" sidebar pane: reads the
 /// activated row's label back out of the list store and runs
 /// `sidebar::comment_navigation_script` in the WebView to jump there.
@@ -844,16 +812,8 @@ fn start_server_for(
 
     let document_for_thread = Arc::clone(&document);
     let version_for_server = version.clone();
-    let git_runner: Arc<dyn mudl_diff::git::GitRunner + Send + Sync> =
-        Arc::new(mudl_diff::git::RealGitRunner);
     thread::spawn(move || {
-        server::serve(
-            listener,
-            version_for_server,
-            filesystem,
-            document_for_thread,
-            git_runner,
-        )
+        server::serve(listener, version_for_server, filesystem, document_for_thread)
     });
 
     let watch_source = mudl_watch::PollingChangeSource::new(

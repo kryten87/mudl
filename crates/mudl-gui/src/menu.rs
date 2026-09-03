@@ -16,8 +16,8 @@
 //! correct at the moment it's opened, and GTK's `set_active` is a no-op
 //! when the value isn't actually changing, so this can't loop.
 //!
-//! Show Comments, Add Comment, Hide Changes, Undo, and Redo are built
-//! disabled (`set_sensitive(false)`) — see the Phase 15 intro in
+//! Show Comments, Add Comment, Undo, and Redo are built disabled
+//! (`set_sensitive(false)`) — see the Phase 15 intro in
 //! `docs/IMPLEMENTATION-PLAN.md` for why each is deferred.
 
 use std::cell::RefCell;
@@ -30,7 +30,6 @@ use webkit2gtk::{PrintOperationExt, WebViewExt};
 use mudl_config::{Preferences, Theme};
 use mudl_server::routes::Mode;
 
-use crate::changes;
 use crate::recent;
 use crate::toolbar;
 use crate::window::{self, Registry, TabHandle};
@@ -234,7 +233,7 @@ fn connect_open_in_browser(item: &gtk::MenuItem, ctx: &Context) {
     let notebook = ctx.notebook.clone();
     item.connect_activate(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
-            let url = changes::document_url(tab.toolbar_ctx.addr, tab.toolbar_ctx.mode.get(), None);
+            let url = toolbar::document_url(tab.toolbar_ctx.addr, tab.toolbar_ctx.mode.get());
             let _ =
                 gtk::gio::AppInfo::launch_default_for_uri(&url, gtk::gio::AppLaunchContext::NONE);
         });
@@ -489,18 +488,6 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
     );
     connect_hide_sidebar(&hide_sidebar, ctx);
     menu.append(&hide_sidebar);
-
-    // Deferred (Phase 15 intro): needs a new CSS class to hide the
-    // waypoint-diff overlay independently of clearing the waypoint.
-    let hide_changes = gtk::CheckMenuItem::with_label("Hide Changes");
-    add_accel(
-        &hide_changes,
-        accel_group,
-        key::c,
-        Mod::CONTROL_MASK | Mod::SHIFT_MASK,
-    );
-    hide_changes.set_sensitive(false);
-    menu.append(&hide_changes);
 
     // Deferred (Phase 15 intro): needs runtime sidebar-pane switching.
     let show_comments = gtk::CheckMenuItem::with_label("Show Comments");

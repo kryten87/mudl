@@ -26,8 +26,7 @@ fn parser_options() -> Options {
 /// `[\w-]` characters) rather than an authorial footnote label. Mirrors
 /// `mudl_core::footnotes::is_comment_label` -- duplicated rather than
 /// imported, since `mudl-core` depends on this crate, not the other way
-/// around (the same shape as `mudl-diff`'s duplicate of the same
-/// predicate).
+/// around.
 fn is_comment_label(label: &str) -> bool {
     match label.strip_prefix("comment-") {
         Some(suffix) if !suffix.is_empty() => suffix

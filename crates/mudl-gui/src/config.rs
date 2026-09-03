@@ -18,7 +18,6 @@ pub fn document_config(prefs: &Preferences) -> DocumentConfig {
         render_options: RenderOptions {
             doc_c_alert_mode: map_doc_c_alert_mode(prefs.markdown_doc_c_alert_mode),
             standalone: false,
-            waypoint: None,
         },
         theme_css_name: theme_css_asset_name(prefs.theme),
         up_zoom: 1.0,

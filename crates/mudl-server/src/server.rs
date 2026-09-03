@@ -15,8 +15,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use mudl_diff::git::GitRunner;
-
 use crate::assets;
 use crate::document::{self, DocumentConfig};
 use crate::fs::FileSystem;
@@ -106,7 +104,6 @@ pub fn serve(
     version: VersionCounter,
     filesystem: Arc<dyn FileSystem>,
     document: Arc<DocumentSource>,
-    git_runner: Arc<dyn GitRunner + Send + Sync>,
 ) {
     for stream in listener.incoming() {
         match stream {
@@ -114,16 +111,7 @@ pub fn serve(
                 let version = version.clone();
                 let filesystem = Arc::clone(&filesystem);
                 let document = Arc::clone(&document);
-                let git_runner = Arc::clone(&git_runner);
-                thread::spawn(move || {
-                    handle_connection(
-                        stream,
-                        &version,
-                        &filesystem,
-                        &document,
-                        git_runner.as_ref(),
-                    )
-                });
+                thread::spawn(move || handle_connection(stream, &version, &filesystem, &document));
             }
             // A single failed accept (e.g. a connection reset before we
             // could accept it) shouldn't take down the whole server.
@@ -141,7 +129,6 @@ fn handle_connection(
     version: &VersionCounter,
     filesystem: &Arc<dyn FileSystem>,
     document: &DocumentSource,
-    git_runner: &dyn GitRunner,
 ) {
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
@@ -150,7 +137,7 @@ fn handle_connection(
     }
 
     let response = match http::parse_request_line(&line) {
-        Some(req) => respond_to(&req, version, filesystem.as_ref(), document, git_runner),
+        Some(req) => respond_to(&req, version, filesystem.as_ref(), document),
         None => bad_request(),
     };
 
@@ -167,13 +154,10 @@ fn respond_to(
     version: &VersionCounter,
     filesystem: &dyn FileSystem,
     document: &DocumentSource,
-    git_runner: &dyn GitRunner,
 ) -> Vec<u8> {
     match routes::dispatch(req) {
         Route::Asset(name) => serve_asset(&name),
-        Route::Document(mode, waypoint) => {
-            serve_document(mode, waypoint, version, filesystem, document, git_runner)
-        }
+        Route::Document(mode) => serve_document(mode, version, filesystem, document),
         Route::LocalFile(path) => serve_local_file(&path, filesystem, document),
         Route::WaitForChange(since) => wait_for_change(since, version),
         Route::NotFound => not_found(),
@@ -187,22 +171,11 @@ fn respond_to(
 /// `crate::document::render`. A read error (file missing, permission
 /// denied, ...) is reported as a plain 404, matching `serve_local_file`'s
 /// same simplification.
-///
-/// `waypoint` (Phase 13.9's "Changes since…" picker, `?waypoint=N`) is
-/// resolved fresh on every request too: `waypoint_index` into
-/// `mudl_diff::git::query_waypoints`' result for this file, at this
-/// moment, matching Down/Up mode's own "never trust cached state" design.
-/// An out-of-range index is silently ignored (rendered with no overlay)
-/// rather than treated as an error — the candidate list can shrink between
-/// the GUI populating a popover and the user picking a now-stale entry
-/// from it (e.g. a commit landed in between).
 fn serve_document(
     mode: routes::Mode,
-    waypoint_index: Option<usize>,
     version: &VersionCounter,
     filesystem: &dyn FileSystem,
     document: &DocumentSource,
-    git_runner: &dyn GitRunner,
 ) -> Vec<u8> {
     let bytes = match filesystem.read(&document.path) {
         Ok(bytes) => bytes,
@@ -216,16 +189,7 @@ fn serve_document(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let mut config = document.config_snapshot();
-    if let Some(index) = waypoint_index {
-        let candidates = mudl_diff::git::query_waypoints(git_runner, &document.path, &markdown);
-        if let Some(candidate) = candidates.into_iter().nth(index) {
-            config.render_options.waypoint = Some(mudl_core::options::Waypoint {
-                old_markdown: candidate.content,
-                word_diff_threshold: 0.25,
-            });
-        }
-    }
+    let config = document.config_snapshot();
 
     let (html, allowed_local_paths) = document::render(
         &markdown,
@@ -319,26 +283,11 @@ mod respond_to_tests {
         DocumentSource::new(PathBuf::from("/docs/notes.md"))
     }
 
-    fn git_runner() -> mudl_diff::git::ScriptedGitRunner {
-        mudl_diff::git::ScriptedGitRunner::new()
-    }
-
     fn req(path: &str) -> Request {
         Request {
             method: Method::Get,
             path: path.to_string(),
             query: HashMap::new(),
-        }
-    }
-
-    fn req_with_query(path: &str, query: &[(&str, &str)]) -> Request {
-        Request {
-            method: Method::Get,
-            path: path.to_string(),
-            query: query
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
         }
     }
 
@@ -373,7 +322,6 @@ mod respond_to_tests {
             &version,
             &empty_fs(),
             &document_source(),
-            &git_runner(),
         );
         let text = String::from_utf8(response.clone()).unwrap();
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
@@ -389,7 +337,6 @@ mod respond_to_tests {
             &version,
             &empty_fs(),
             &document_source(),
-            &git_runner(),
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
@@ -402,7 +349,6 @@ mod respond_to_tests {
             &version,
             &empty_fs(),
             &document_source(),
-            &git_runner(),
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
@@ -418,7 +364,6 @@ mod respond_to_tests {
             &version,
             &filesystem,
             &document_source(),
-            &git_runner(),
         );
 
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
@@ -440,7 +385,7 @@ mod respond_to_tests {
             ..DocumentConfig::default()
         });
 
-        let response = respond_to(&req("/"), &version, &filesystem, &document, &git_runner());
+        let response = respond_to(&req("/"), &version, &filesystem, &document);
         let text = String::from_utf8_lossy(&response).into_owned();
         assert!(text.contains("Theme: Riot"));
     }
@@ -463,7 +408,6 @@ mod respond_to_tests {
             &version,
             &filesystem,
             &document_source(),
-            &git_runner(),
         );
 
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
@@ -479,7 +423,6 @@ mod respond_to_tests {
             &version,
             &empty_fs(),
             &document_source(),
-            &git_runner(),
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
@@ -492,7 +435,7 @@ mod respond_to_tests {
         filesystem: &dyn FileSystem,
         document: &DocumentSource,
     ) {
-        respond_to(&req("/"), version, filesystem, document, &git_runner());
+        respond_to(&req("/"), version, filesystem, document);
     }
 
     #[test]
@@ -509,7 +452,6 @@ mod respond_to_tests {
             &version,
             &filesystem,
             &document,
-            &git_runner(),
         );
 
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
@@ -531,7 +473,6 @@ mod respond_to_tests {
             &version,
             &filesystem,
             &document,
-            &git_runner(),
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
@@ -553,7 +494,6 @@ mod respond_to_tests {
             &version,
             &filesystem,
             &document,
-            &git_runner(),
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
@@ -569,72 +509,8 @@ mod respond_to_tests {
             &version,
             &filesystem,
             &document_source(),
-            &git_runner(),
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
-    }
-
-    #[test]
-    fn document_route_with_waypoint_overlays_a_diff_against_git_history() {
-        let version = VersionCounter::new();
-        let filesystem = InMemoryFileSystem::new();
-        filesystem.insert("/docs/notes.md", b"# Hello\n\nNew text.\n".to_vec());
-
-        let scripted = mudl_diff::git::ScriptedGitRunner::new()
-            .script(&["rev-parse", "--show-toplevel"], 0, "/docs")
-            .script(&["show", ":notes.md"], 128, "")
-            .script(&["diff", "--quiet", "--", "notes.md"], 1, "")
-            .script(&["ls-files", "--debug", "--", "notes.md"], 128, "")
-            .script(
-                &[
-                    "log",
-                    "--format=%H%x00%aI%x00%s",
-                    "-n",
-                    "5",
-                    "--",
-                    "notes.md",
-                ],
-                0,
-                &format!("{}\u{0}2026-01-01T00:00:00Z\u{0}Initial", "a".repeat(40)),
-            )
-            .script(
-                &["show", &format!("{}:notes.md", "a".repeat(40))],
-                0,
-                "# Hello\n\nOld text.\n",
-            );
-
-        let response = respond_to(
-            &req_with_query("/", &[("waypoint", "0")]),
-            &version,
-            &filesystem,
-            &document_source(),
-            &scripted,
-        );
-
-        assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
-        let text = String::from_utf8_lossy(&response).into_owned();
-        assert!(text.contains("mudl-change"));
-        assert!(text.contains("New text."));
-        assert!(text.contains("Old text."));
-    }
-
-    #[test]
-    fn document_route_with_out_of_range_waypoint_renders_with_no_overlay() {
-        let version = VersionCounter::new();
-        let filesystem = InMemoryFileSystem::new();
-        filesystem.insert("/docs/notes.md", b"# Hello\n".to_vec());
-
-        let response = respond_to(
-            &req_with_query("/", &[("waypoint", "3")]),
-            &version,
-            &filesystem,
-            &document_source(),
-            &git_runner(),
-        );
-
-        assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
-        let text = String::from_utf8_lossy(&response).into_owned();
-        assert!(!text.contains("mudl-change"));
     }
 
     #[test]
@@ -652,7 +528,6 @@ mod respond_to_tests {
             &version,
             &empty_fs(),
             &document_source(),
-            &git_runner(),
         );
         assert!(start.elapsed() < WAIT_TIMEOUT);
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
@@ -667,7 +542,6 @@ mod respond_to_tests {
             &version,
             &empty_fs(),
             &document_source(),
-            &git_runner(),
         );
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert_eq!(body_of(&response), r#"{"version":0}"#);

@@ -1,5 +1,4 @@
 pub mod alerts;
-pub mod changes;
 pub mod comments_html;
 pub mod emoji;
 pub mod encoding;

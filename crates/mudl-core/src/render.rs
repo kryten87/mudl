@@ -17,7 +17,6 @@ use std::ops::Range;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Tag, TagEnd};
 
 use crate::alerts::{detect_docc_aside, detect_gfm_alert, parse_aside_tag, AlertCategory};
-use crate::changes::{self, UpOverlay};
 use crate::comments_html::{comments_section, footnotes_section};
 use crate::emoji::replace_shortcodes;
 use crate::encoding::html_escape;
@@ -47,14 +46,6 @@ pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
         None => (markdown.to_string(), String::new()),
     };
 
-    let overlay = options.waypoint.as_ref().map(|wp| {
-        let old_body = match frontmatter::extract(&wp.old_markdown) {
-            Some(fm) => fm.body,
-            None => wp.old_markdown.clone(),
-        };
-        changes::up_overlay(&old_body, &body, wp.word_diff_threshold)
-    });
-
     let parsed = ParsedMarkdown::new(&body);
     let footnote_numbers = number_footnotes(&parsed.events);
     let mut renderer = Renderer {
@@ -67,13 +58,9 @@ pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
         in_table_head: false,
         cell_index: 0,
         skip_leading_dollar: false,
-        overlay: overlay.as_ref(),
         footnote_numbers: &footnote_numbers,
     };
     renderer.run();
-    if let Some(overlay) = &overlay {
-        renderer.out.push_str(overlay.trailing_deletions());
-    }
     renderer
         .out
         .push_str(&footnotes_section(&body, &footnote_numbers, options));
@@ -89,7 +76,7 @@ pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
 /// this count -- a narrow, deliberate scope cut, since a footnote that
 /// self-references is vanishingly rare and excluding it would need this
 /// walk to also track definition boundaries, which it otherwise has no use
-/// for (the definition-body skip in `render_container_inner` handles the
+/// for (the definition-body skip in `render_container` handles the
 /// exclusion structurally, by discarding the nested marker's *output*
 /// rather than by never assigning it a number).
 fn number_footnotes(events: &[(Event, Range<usize>)]) -> HashMap<String, u32> {
@@ -123,54 +110,14 @@ fn number_footnotes(events: &[(Event, Range<usize>)]) -> HashMap<String, u32> {
 /// Visual line numbering is CSS-driven from the `data-line` attribute,
 /// matching `mud`'s approach — this function only emits the attribute,
 /// not rendered number text.
-///
-/// When `options.waypoint` is set (Phase 13.8), each line is instead drawn
-/// from `changes::down_overlay_lines`, which reconstructs the line
-/// sequence (deleted old lines spliced back in) from a `ChangePlan` built
-/// over whole lines as `Verbatim` leaf blocks; a changed line gets
-/// `is-inserted`/`is-deleted` classes plus `data-change-id`/
-/// `data-group-id` attributes alongside `data-line`.
-pub fn render_down(markdown: &str, options: &RenderOptions) -> String {
+pub fn render_down(markdown: &str, _options: &RenderOptions) -> String {
     let mut out = String::new();
-    match &options.waypoint {
-        None => {
-            for (index, line) in markdown.lines().enumerate() {
-                out.push_str("<div class=\"line\" data-line=\"");
-                out.push_str(&(index + 1).to_string());
-                out.push_str("\">");
-                out.push_str(&html_escape(line));
-                out.push_str("</div>");
-            }
-        }
-        Some(wp) => {
-            for overlay_line in
-                changes::down_overlay_lines(&wp.old_markdown, markdown, wp.word_diff_threshold)
-            {
-                let class = match overlay_line.annotation {
-                    changes::LineAnnotation::Unchanged => "line",
-                    changes::LineAnnotation::Inserted => "line is-inserted",
-                    changes::LineAnnotation::Deleted => "line is-deleted",
-                };
-                out.push_str("<div class=\"");
-                out.push_str(class);
-                out.push_str("\" data-line=\"");
-                out.push_str(&overlay_line.display_line.to_string());
-                out.push('"');
-                if let Some(change_id) = &overlay_line.change_id {
-                    out.push_str(" data-change-id=\"");
-                    out.push_str(&html_escape(change_id));
-                    out.push('"');
-                }
-                if let Some(group_id) = &overlay_line.group_id {
-                    out.push_str(" data-group-id=\"");
-                    out.push_str(&html_escape(group_id));
-                    out.push('"');
-                }
-                out.push('>');
-                out.push_str(&html_escape(overlay_line.text));
-                out.push_str("</div>");
-            }
-        }
+    for (index, line) in markdown.lines().enumerate() {
+        out.push_str("<div class=\"line\" data-line=\"");
+        out.push_str(&(index + 1).to_string());
+        out.push_str("\">");
+        out.push_str(&html_escape(line));
+        out.push_str("</div>");
     }
     out
 }
@@ -189,11 +136,6 @@ struct Renderer<'a> {
     // very next event is the `Text` holding the closing `$`, so its leading
     // byte must be dropped too. Always consumed by the next `Text` seen.
     skip_leading_dollar: bool,
-    /// The Phase 13.8 change-tracking overlay, when `options.waypoint` is
-    /// set. `None` for a normal render — every overlay lookup site treats
-    /// that exactly like "this block has no annotation", so the whole
-    /// feature is a no-op when it's off.
-    overlay: Option<&'a UpOverlay>,
     /// Authorial footnote label -> 1-based display number (Phase 14.6),
     /// computed once by `number_footnotes` before the walk begins so a
     /// `FootnoteReference` can render its marker without re-scanning.
@@ -377,25 +319,6 @@ impl<'a> Renderer<'a> {
     }
 
     fn render_container(&mut self, tag: Tag<'a>) {
-        let block_start = self.events[self.pos - 1].1.start;
-        if let Some(overlay) = self.overlay {
-            if let Some(deleted_html) = overlay.deletions_before(block_start) {
-                self.out.push_str(deleted_html);
-            }
-        }
-        let open_ins = self
-            .overlay
-            .and_then(|overlay| overlay.inserted_open_tag(block_start));
-        if let Some(open_tag) = &open_ins {
-            self.out.push_str(open_tag);
-        }
-        self.render_container_inner(tag);
-        if open_ins.is_some() {
-            self.out.push_str("</ins>");
-        }
-    }
-
-    fn render_container_inner(&mut self, tag: Tag<'a>) {
         match tag {
             Tag::Paragraph => {
                 if let Some(tex) = self.take_display_math_paragraph() {

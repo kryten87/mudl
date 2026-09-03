@@ -15,11 +15,8 @@ pub enum Mode {
 /// filesystem or socket access happens here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
-    /// `/` — the rendered document, in the given mode, optionally
-    /// overlaying a change-tracking diff (Phase 13.9's "Changes since…"
-    /// picker) against the waypoint at this 0-based index into
-    /// `mudl_diff::git::query_waypoints`' result for the file.
-    Document(Mode, Option<usize>),
+    /// `/` — the rendered document, in the given mode.
+    Document(Mode),
     /// `/assets/<name>` — a bundled, embedded static asset.
     Asset(String),
     /// `/local/<percent-encoded-path>` — a local file referenced by the
@@ -33,10 +30,7 @@ pub enum Route {
 /// Maps a parsed [`Request`] to the [`Route`] it should be served by.
 pub fn dispatch(req: &Request) -> Route {
     match req.path.as_str() {
-        "/" => Route::Document(
-            parse_mode(req.query.get("mode")),
-            parse_waypoint(req.query.get("waypoint")),
-        ),
+        "/" => Route::Document(parse_mode(req.query.get("mode"))),
         "/wait" => match parse_since(req.query.get("since")) {
             Some(since) => Route::WaitForChange(since),
             None => Route::NotFound,
@@ -84,14 +78,6 @@ fn parse_since(raw: Option<&String>) -> Option<u64> {
     }
 }
 
-/// `?waypoint=N` selects the diff overlay; absence (or a malformed value)
-/// just means no overlay — unlike `/wait`'s `since`, an unparseable
-/// `waypoint` isn't a route error, since it's an optional add-on to an
-/// otherwise-normal document request.
-fn parse_waypoint(raw: Option<&String>) -> Option<usize> {
-    raw.and_then(|s| s.parse::<usize>().ok())
-}
-
 /// Public so `mudl-gui`'s link-navigation handler (`/local-md/`,
 /// `/local-file/`) can decode the same percent-encoding `mudl-core::template`
 /// uses to build those hrefs, without duplicating this logic.
@@ -134,14 +120,14 @@ mod tests {
 
     #[test]
     fn root_with_no_mode_is_document_up() {
-        assert_eq!(dispatch(&req("/", &[])), Route::Document(Mode::Up, None));
+        assert_eq!(dispatch(&req("/", &[])), Route::Document(Mode::Up));
     }
 
     #[test]
     fn root_with_mode_down_is_document_down() {
         assert_eq!(
             dispatch(&req("/", &[("mode", "down")])),
-            Route::Document(Mode::Down, None)
+            Route::Document(Mode::Down)
         );
     }
 
@@ -149,31 +135,7 @@ mod tests {
     fn root_with_unrecognized_mode_is_document_up() {
         assert_eq!(
             dispatch(&req("/", &[("mode", "sideways")])),
-            Route::Document(Mode::Up, None)
-        );
-    }
-
-    #[test]
-    fn root_with_waypoint_index_is_carried_through() {
-        assert_eq!(
-            dispatch(&req("/", &[("waypoint", "2")])),
-            Route::Document(Mode::Up, Some(2))
-        );
-    }
-
-    #[test]
-    fn root_with_mode_and_waypoint_together() {
-        assert_eq!(
-            dispatch(&req("/", &[("mode", "down"), ("waypoint", "0")])),
-            Route::Document(Mode::Down, Some(0))
-        );
-    }
-
-    #[test]
-    fn root_with_unparseable_waypoint_is_no_overlay() {
-        assert_eq!(
-            dispatch(&req("/", &[("waypoint", "not-a-number")])),
-            Route::Document(Mode::Up, None)
+            Route::Document(Mode::Up)
         );
     }
 

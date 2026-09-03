@@ -265,29 +265,11 @@ explicit context-menu action.
 
 ## 6. "Changes since…" runs `git` inside an untrusted repository
 
-**Severity: medium.** Requires a click.
-
-`connect_changes_button` (`crates/mudl-gui/src/toolbar.rs`) calls
-`mudl_diff::git::query_waypoints`, which runs the system `git` with
-`current_dir` set to the document's own directory
-(`RealGitRunner::run`, `crates/mudl-diff/src/git.rs`).
-
-Git honors the repository's own `.git/config`, and several of its keys
-name commands to execute — `core.fsmonitor` most directly. A repository
-extracted from a downloaded archive is owned by the invoking user, so
-`safe.directory` does not apply. Clicking "Changes since…" on a document
-inside such a repository is enough to run whatever that config names.
-
-The argument construction itself is clean: fixed `&[&str]` arrays, no
-shell, `--` separators before every pathspec, and the two `git show`
-arguments interpolate the relative path after a `:` or a commit hash, so
-a leading `-` can't turn into an option. This is purely the ambient
-git-config class of issue, not argument injection.
-
-**Fix.** Don't run `git` in a directory the user hasn't explicitly
-trusted. A per-repository trust prompt on first use is the conventional
-shape; a narrower alternative is to skip the git integration entirely
-when the repository's `.git/config` sets any command-valued key.
+**Severity: medium. Fixed** — by removal. The "Changes since…" feature
+(the toolbar button, its git-history popover, the change-tracking diff
+overlay, and the `mudl-diff` crate it depended on) has been removed
+entirely, so there's no longer any code path that shells out to `git`
+inside the document's directory.
 
 
 ## 7. Atomic writes drop permissions and follow symlinks

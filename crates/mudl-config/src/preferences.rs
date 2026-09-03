@@ -68,7 +68,6 @@ enum_pref!(FolderOpenBehavior { Index => "index", Tabs => "tabs" }, default = In
 
 enum_pref!(SidebarPane {
     Outline => "outline",
-    Changes => "changes",
     Comments => "comments",
 }, default = Outline);
 
@@ -552,7 +551,7 @@ mod tests {
             down_mode_show_line_numbers: false,
             down_mode_wrap_lines: false,
             sidebar_enabled: true,
-            sidebar_pane: SidebarPane::Changes,
+            sidebar_pane: SidebarPane::Comments,
             markdown_doc_c_alert_mode: DocCAlertMode::Off,
             ui_use_heading_as_title: false,
             ui_show_readable_column: true,

@@ -4,9 +4,9 @@
 //! footnote whose label matches `^comment-[\w-]+$` (`mudl_core::footnotes::
 //! is_comment_label`, Phase 1.8), storing a quoted-anchor + threaded
 //! discussion as the footnote's body. Not a dependency of `mudl-core` in the
-//! other direction: `mudl-core` depends on this crate (the same shape as
-//! `mudl-diff`), so this crate does its own `pulldown-cmark` parsing rather
-//! than importing `mudl-core`'s renderer.
+//! other direction: `mudl-core` depends on this crate, so this crate does
+//! its own `pulldown-cmark` parsing rather than importing `mudl-core`'s
+//! renderer.
 
 pub mod anchor;
 pub mod document;

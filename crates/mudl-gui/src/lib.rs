@@ -1,7 +1,6 @@
 //! GTK3 + WebKit2GTK application shell (Phase 10 of
 //! `docs/IMPLEMENTATION-PLAN.md`).
 
-mod changes;
 mod comments;
 mod config;
 mod find;

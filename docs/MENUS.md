@@ -28,7 +28,6 @@
 
 ## View
 - Hide Sidebar <Ctrl-Shift-S>
-- Hide Changes <Ctrl-Shift-C>
 - Show Comments <Ctrl-Shift-K>
 - --- horizontal separator
 - Mark Up

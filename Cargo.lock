@@ -453,13 +453,8 @@ name = "mudl-core"
 version = "0.1.0"
 dependencies = [
  "mudl-comments",
- "mudl-diff",
  "pulldown-cmark",
 ]
-
-[[package]]
-name = "mudl-diff"
-version = "0.1.0"
 
 [[package]]
 name = "mudl-gui"
@@ -470,7 +465,6 @@ dependencies = [
  "mudl-comments",
  "mudl-config",
  "mudl-core",
- "mudl-diff",
  "mudl-server",
  "mudl-watch",
  "webkit2gtk",
@@ -481,7 +475,6 @@ name = "mudl-server"
 version = "0.1.0"
 dependencies = [
  "mudl-core",
- "mudl-diff",
  "mudl-watch",
 ]
 
