@@ -243,6 +243,78 @@
     }
   }
 
+  // -- Blocked remote images --------------------------------------------------
+
+  // A remote http(s) image that fails to load usually means `img-src` left
+  // it out (`docs/SECURITY.md` Finding 4 — remote images are off by default
+  // so a document can't beacon the reader's IP and open-time to whoever
+  // wrote it), not a dead link. The browser's own fallback for a failed
+  // image is just the bare alt text with no visible box, which gives no
+  // hint that anything was hidden — so a failed *remote* image (same-origin
+  // `/local/...`/`/assets/...` failures are left to the browser's ordinary
+  // broken-image rendering, since those aren't this feature's doing) is
+  // swapped for a placeholder that says so and names the menu item that
+  // turns it back on.
+
+  function isRemoteImage(img) {
+    if (!/^https?:\/\//i.test(img.src)) return false;
+    try {
+      return new URL(img.src).origin !== window.location.origin;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Reads the answer back out of the page's own CSP `<meta>` tag rather than
+  // threading a separate flag through the template — that tag is already
+  // the single source of truth for whether this page's `img-src` admits
+  // `https:`/`http:` (`crates/mudl-server/src/document.rs`'s `csp_img_src`).
+  function remoteImagesCurrentlyAllowed() {
+    var meta = document.querySelector(
+      'meta[http-equiv="Content-Security-Policy"]'
+    );
+    var match = meta && /img-src([^;]*)/.exec(meta.content);
+    return !!match && /https?:/.test(match[1]);
+  }
+
+  function showBlockedImagePlaceholder(img, allowed) {
+    if (img.dataset.mudBlockedShown) return;
+    img.dataset.mudBlockedShown = "1";
+
+    var label = img.getAttribute("alt") || img.src;
+    var note = document.createElement("span");
+    note.className = "mud-blocked-image";
+    note.textContent = allowed
+      ? "Image failed to load: " + label
+      : "External image hidden (" + label + ") — enable via View > Show External Images";
+    img.replaceWith(note);
+  }
+
+  // Every remote image already in the DOM by the time this (un-deferred,
+  // end-of-body) script runs is swapped immediately when the page's own CSP
+  // rules it out — rather than waiting for the browser's `error` event, which
+  // an image the reader already loaded once (an earlier "Show External
+  // Images" reload of this same URL) may not fire again on a later reload:
+  // it can be served straight out of WebKit's own cache with no fresh
+  // network request or `error` event at all, which is what let the plain
+  // alt-text fallback slip back in after a toggle-on/toggle-off cycle.
+  if (!remoteImagesCurrentlyAllowed()) {
+    Array.prototype.forEach.call(document.images, function (img) {
+      if (isRemoteImage(img)) showBlockedImagePlaceholder(img, false);
+    });
+  }
+
+  // Catches everything the proactive scan above can't: an allowed remote
+  // image that genuinely fails (dead link, offline), and any image a later
+  // script inserts into the page. Capture phase, since `error` doesn't
+  // bubble.
+  document.addEventListener("error", function (event) {
+    var img = event.target;
+    if (!img || img.tagName !== "IMG") return;
+    if (!isRemoteImage(img)) return;
+    showBlockedImagePlaceholder(img, remoteImagesCurrentlyAllowed());
+  }, true);
+
   // -- Theme ----------------------------------------------------------------
 
   function setTheme(cssString) {

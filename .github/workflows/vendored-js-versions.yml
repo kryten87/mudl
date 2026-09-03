@@ -1,0 +1,66 @@
+name: Vendored JS version check
+
+# docs/SECURITY.md Finding 8, "Vendored JavaScript is pinned with no update
+# path": resources/js/{highlight,mermaid,temml}.min.js are copied in at a
+# point in time and nothing previously noticed when one of them fell behind
+# a published (and possibly security-relevant) upstream release. This job
+# extracts the version each file's own banner/metadata claims and diffs it
+# against npm's `latest` dist-tag for the same package, on a schedule so
+# drift is noticed independent of any particular PR touching these files.
+#
+# Deliberately its own workflow rather than a step in ci.yml: this reaches
+# out to the network (npm's registry) and can fail solely because an
+# upstream project cut a new release, which isn't a signal that anything in
+# this repo's own change is broken — it shouldn't gate merges the way
+# ci.yml's checks do.
+on:
+  schedule:
+    # Mondays at 06:00 UTC. These libraries release infrequently enough
+    # that daily checking would just be noise.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    name: compare pinned versions against npm
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Diff vendored versions against npm's latest
+        run: |
+          set -euo pipefail
+
+          declare -A pinned
+          pinned[highlight.js]=$(grep -oP 'Highlight\.js v\K[0-9]+\.[0-9]+\.[0-9]+' resources/js/highlight.min.js)
+          pinned[mermaid]=$(grep -oP 'name:"mermaid",version:"\K[0-9]+\.[0-9]+\.[0-9]+' resources/js/mermaid.min.js)
+          pinned[temml]=$(grep -oP 'Temml v\K[0-9]+\.[0-9]+\.[0-9]+' resources/js/temml.min.js)
+
+          status=0
+          for lib in "${!pinned[@]}"; do
+            version="${pinned[$lib]}"
+            if [ -z "$version" ]; then
+              echo "::error::couldn't extract the vendored version for $lib — has its banner/metadata changed shape?"
+              status=1
+              continue
+            fi
+
+            latest=$(curl -sf --max-time 10 "https://registry.npmjs.org/${lib}/latest" \
+              | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)
+            if [ -z "$latest" ]; then
+              echo "::warning::couldn't fetch npm's latest version for $lib; skipping"
+              continue
+            fi
+
+            if [ "$version" != "$latest" ]; then
+              echo "::warning::$lib is vendored at $version but npm's latest is $latest — see docs/SECURITY.md Finding 8 (Vendored JavaScript)"
+              status=1
+            else
+              echo "$lib is up to date at $version"
+            fi
+          done
+
+          exit "$status"

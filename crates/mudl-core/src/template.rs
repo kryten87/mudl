@@ -285,20 +285,46 @@ pub fn rewrite_local_image_srcs(html: &str, base_dir: &Path) -> String {
 /// absolute local paths every non-external `src` was rewritten to.
 ///
 /// This is the exact set of paths a document legitimately needs served
-/// through `/local/<path>` — `mudl-server`'s `DocumentSource` records it at
-/// render time and confines `Route::LocalFile` to it, closing the arbitrary
-/// local file read described in `docs/SECURITY.md` Finding 2 (previously
-/// `serve_local_file` would read and return *any* path a request named,
-/// with no relation to the document being viewed).
-pub fn rewrite_local_image_srcs_with_paths(html: &str, base_dir: &Path) -> (String, Vec<PathBuf>) {
+/// through `/local/<token>/<path>` — `mudl-server`'s `DocumentSource`
+/// records it at render time and confines `Route::LocalFile` to it, closing
+/// the arbitrary local file read described in `docs/SECURITY.md` Finding 2
+/// (previously `serve_local_file` would read and return *any* path a
+/// request named, with no relation to the document being viewed).
+///
+/// `token` is the serving `DocumentSource`'s per-instance random token
+/// (`docs/SECURITY.md` Finding 2's first hardening step): embedding it in
+/// every generated URL is what lets `serve_local_file` demand it back
+/// before treating a `/local/` request as legitimate, so a party that
+/// merely finds the port — a port scan, or a DNS-rebound page guessing it
+/// — can't ask for a `/local/` path cold, without ever having loaded `/`
+/// and been handed the token in its own rendered `<img src>` values.
+///
+/// A path is only added to the allowlist when [`crate::images::classify`]
+/// recognizes its extension as an image type. Without this check, a
+/// document with `<img src="notes.html">` would put an arbitrary `.html`
+/// path in the allowlist, which `/local/` then serves as scriptable
+/// same-origin content (`docs/SECURITY.md` Finding 8, "`/local/` serves
+/// `.html` as `text/html`") — the `src` is still rewritten to `/local/...`
+/// either way, so an unrecognized extension just renders as a broken image,
+/// same as a path that doesn't exist.
+pub fn rewrite_local_image_srcs_with_paths(
+    html: &str,
+    base_dir: &Path,
+    token: &str,
+) -> (String, Vec<PathBuf>) {
     let paths = RefCell::new(Vec::new());
     let rewritten = rewrite_img_srcs(html, &|src| {
         if is_external_source(src) {
             return src.to_string();
         }
         let resolved = base_dir.join(src);
-        let rewritten_src = format!("/local/{}", percent_encode(&resolved.to_string_lossy()));
-        paths.borrow_mut().push(resolved);
+        let rewritten_src = format!(
+            "/local/{token}/{}",
+            percent_encode(&resolved.to_string_lossy())
+        );
+        if crate::images::classify(src, base_dir).is_some() {
+            paths.borrow_mut().push(resolved);
+        }
         rewritten_src
     });
     (rewritten, paths.into_inner())
@@ -1012,10 +1038,10 @@ mod rewrite_local_image_srcs_with_paths_tests {
     fn collects_resolved_paths_for_local_srcs() {
         let base = Path::new("/base/dir");
         let html = r#"<p><img src="a.png"> <img src="b.png"></p>"#;
-        let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base);
+        let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base, "tok");
         assert_eq!(
             rewritten,
-            "<p><img src=\"/local//base/dir/a.png\"> <img src=\"/local//base/dir/b.png\"></p>"
+            "<p><img src=\"/local/tok//base/dir/a.png\"> <img src=\"/local/tok//base/dir/b.png\"></p>"
         );
         assert_eq!(
             paths,
@@ -1027,11 +1053,33 @@ mod rewrite_local_image_srcs_with_paths_tests {
     }
 
     #[test]
+    fn token_is_embedded_in_the_generated_url() {
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="photo.png">"#;
+        let (rewritten, _) = rewrite_local_image_srcs_with_paths(html, base, "s3cr3t");
+        assert_eq!(rewritten, "<img src=\"/local/s3cr3t//base/dir/photo.png\">");
+    }
+
+    #[test]
     fn external_srcs_contribute_no_paths() {
         let base = Path::new("/base/dir");
         let html = r#"<img src="https://example.com/photo.png">"#;
-        let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base);
+        let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base, "tok");
         assert_eq!(rewritten, html);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn unrecognized_extension_is_rewritten_but_not_allowlisted() {
+        // `docs/SECURITY.md` Finding 8: `<img src="notes.html">` must not
+        // put an `.html` path in the allowlist `/local/` trusts, even
+        // though the `src` is still rewritten the same as any other local
+        // path (so it renders as a broken image rather than being
+        // silently dropped).
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="notes.html">"#;
+        let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base, "tok");
+        assert_eq!(rewritten, "<img src=\"/local/tok//base/dir/notes.html\">");
         assert!(paths.is_empty());
     }
 }

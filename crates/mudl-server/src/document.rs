@@ -47,6 +47,14 @@ pub struct DocumentConfig {
     /// Both modes' `is-readable-column` root class (`mud-up.css`/
     /// `mud-down.css`).
     pub readable_column: bool,
+    /// Per-tab, in-memory opt-in for `docs/SECURITY.md` Finding 4: when
+    /// `false` (the default), `csp_img_src` omits `https:`/`http:`, so a
+    /// remote image can't be used as an open-time tracking beacon. Never
+    /// sourced from `Preferences` — `mudl-gui`'s "Show External Images"
+    /// menu item flips this live via `DocumentSource::set_config` and
+    /// leaves it out of what gets written to the preferences file, so it
+    /// resets to `false` every time a document is (re)opened.
+    pub allow_remote_images: bool,
 }
 
 impl Default for DocumentConfig {
@@ -59,6 +67,7 @@ impl Default for DocumentConfig {
             show_line_numbers: true,
             wrap_lines: true,
             readable_column: false,
+            allow_remote_images: false,
         }
     }
 }
@@ -71,6 +80,11 @@ impl Default for DocumentConfig {
 /// `Route::LocalFile` can confine itself to exactly the files this render
 /// referenced, rather than serving any path a request names (`docs/SECURITY.md`
 /// Finding 2).
+///
+/// `local_token` is the serving `DocumentSource`'s per-instance random
+/// token (Finding 2's first hardening step); it's embedded in every
+/// generated `/local/<token>/<path>` URL so `serve_local_file` can demand
+/// it back before treating the request as legitimate.
 pub fn render(
     markdown: &str,
     base_dir: &Path,
@@ -78,12 +92,14 @@ pub fn render(
     mode: Mode,
     version: u64,
     config: &DocumentConfig,
+    local_token: &str,
 ) -> (String, Vec<PathBuf>) {
     let body = match mode {
         Mode::Up => render_up(markdown, &config.render_options),
         Mode::Down => render_down(markdown, &config.render_options),
     };
-    let (body, allowed_local_paths) = rewrite_local_image_srcs_with_paths(&body, base_dir);
+    let (body, allowed_local_paths) =
+        rewrite_local_image_srcs_with_paths(&body, base_dir, local_token);
     let body = rewrite_local_link_hrefs(&body, base_dir);
     // `data-mudl-version` carries the live-reload baseline to
     // `live-reload.js` without an inline `<script>` — see the
@@ -116,12 +132,7 @@ pub fn render(
         title: title.to_string(),
         base_href: None,
         styles,
-        csp_img_src: vec![
-            "'self'".to_string(),
-            "https:".to_string(),
-            "http:".to_string(),
-            "data:".to_string(),
-        ],
+        csp_img_src: csp_img_src(config),
         // No `'unsafe-inline'` (`docs/SECURITY.md` Finding 3): every script
         // this page runs is loaded from `/assets/`, and the live-reload
         // version it used to need an inline bootstrap for now travels as
@@ -136,6 +147,19 @@ pub fn render(
         body_scripts: scripts,
     };
     (doc.render(), allowed_local_paths)
+}
+
+/// `'self' data:` by default (`docs/SECURITY.md` Finding 4); adds
+/// `https:`/`http:` only when `config.allow_remote_images` opts in for this
+/// tab.
+fn csp_img_src(config: &DocumentConfig) -> Vec<String> {
+    let mut sources = vec!["'self'".to_string()];
+    if config.allow_remote_images {
+        sources.push("https:".to_string());
+        sources.push("http:".to_string());
+    }
+    sources.push("data:".to_string());
+    sources
 }
 
 /// The `<html>` root classes matching Phase 10.4's toggle-button state,
@@ -187,6 +211,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("class=\"up-mode-output\""));
         assert!(html.contains("<h1"));
@@ -204,6 +229,7 @@ mod tests {
             Mode::Down,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("class=\"down-mode-output\""));
         assert!(html.contains("line one"));
@@ -220,6 +246,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("<title>my-notes.md</title>"));
     }
@@ -233,6 +260,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("Theme: Earthy"));
     }
@@ -246,6 +274,7 @@ mod tests {
             Mode::Up,
             42,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("data-mudl-version=\"42\""));
         assert!(html.contains("/assets/live-reload.js"));
@@ -260,6 +289,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("src=\"/local/"));
     }
@@ -273,6 +303,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert_eq!(allowed_local_paths, vec![Path::new("/docs/photo.png")]);
     }
@@ -286,6 +317,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(allowed_local_paths.is_empty());
     }
@@ -299,6 +331,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("href=\"/local-md/"));
     }
@@ -312,6 +345,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("href=\"/local-file/"));
     }
@@ -325,6 +359,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("href=\"#section\""));
     }
@@ -338,6 +373,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("/assets/highlight.min.js"));
         assert!(html.contains("/assets/highlight-init.js"));
@@ -350,8 +386,8 @@ mod tests {
             down_zoom: 0.8,
             ..DocumentConfig::default()
         };
-        let (up_html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config);
-        let (down_html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
+        let (up_html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config, "tok");
+        let (down_html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config, "tok");
         assert!(up_html.contains("style=\"zoom: 1.5\""));
         assert!(down_html.contains("style=\"zoom: 0.8\""));
     }
@@ -375,9 +411,35 @@ mod tests {
             Mode::Down,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         let classes = html_root_class_attr(&html);
         assert_eq!(classes, "has-line-numbers has-word-wrap");
+    }
+
+    #[test]
+    fn img_src_excludes_remote_schemes_by_default() {
+        let (html, _) = render(
+            "hi",
+            base_dir(),
+            "notes.md",
+            Mode::Up,
+            0,
+            &DocumentConfig::default(),
+            "tok",
+        );
+        assert!(html.contains("img-src 'self' data:"));
+        assert!(!html.contains("img-src 'self' https:"));
+    }
+
+    #[test]
+    fn img_src_includes_remote_schemes_when_allowed() {
+        let config = DocumentConfig {
+            allow_remote_images: true,
+            ..DocumentConfig::default()
+        };
+        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config, "tok");
+        assert!(html.contains("img-src 'self' https: http: data:"));
     }
 
     #[test]
@@ -388,7 +450,7 @@ mod tests {
             readable_column: true,
             ..DocumentConfig::default()
         };
-        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
+        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config, "tok");
         let classes = html_root_class_attr(&html);
         assert_eq!(classes, "is-readable-column");
     }

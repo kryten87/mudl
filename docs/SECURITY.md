@@ -1,12 +1,28 @@
 # Security Review
 
-A review of `mudl` as of `ebab3e7` (Phases 0–15 complete), covering all
-eight crates in `crates/`, the bundled assets in `resources/`, and the
-vendored third-party JavaScript.
+A review of `mudl` originally written against `ebab3e7` (Phases 0–15
+complete), covering every crate in `crates/`, the bundled assets in
+`resources/`, and the vendored third-party JavaScript. **Re-evaluated
+against `e88708e`** (2026-09-03), with each finding checked against the
+code as it now stands; the crate count is down to seven since the original
+review, `mudl-diff` having gone with the feature that used it (Finding 6).
 
-Findings are ordered by severity. Each one states what the code does, why
-it matters, and what a fix looks like. Nothing here has been fixed yet —
-this document is the record of what was found, not a changelog.
+Findings are ordered by original severity. Each one states what the code
+does, why it matters, and what a fix looks like; where a fix has landed,
+the finding says so and the original description is preserved below it as
+the record of what was found.
+
+Current status:
+
+| # | Finding | Severity | Status |
+|---|---------|----------|--------|
+| 2 | Arbitrary local file read over the HTTP server | critical | **Fixed**; both hardening steps done |
+| 3 | Script execution from document content | critical | **Fixed** |
+| 4 | Remote images load unconditionally | low | **Fixed** |
+| 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
+| 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal) |
+| 7 | Atomic writes drop permissions and follow symlinks | low-medium | **Fixed** |
+| 8 | Smaller items | — | All fixed |
 
 
 ## 1. Threat model
@@ -40,6 +56,13 @@ the conclusion doesn't follow: upstream `mud` relies on the sandbox to
 sandbox without replacing it with in-app confinement moved that behavior
 from contained to unconfined.
 
+*Re-evaluation:* that in-app confinement now exists for the two critical
+cases — the `/local/` route serves only paths the open document itself
+embedded (Finding 2), and raw HTML and link schemes are sanitized before
+they reach the page (Finding 3) — so the gap the missing sandbox left is
+closed for those. The unauthenticated loopback socket and the unsandboxed
+filesystem access remain properties of the design.
+
 
 ## 2. Arbitrary local file read over the HTTP server
 
@@ -54,11 +77,28 @@ whose path isn't in that set, before it ever reaches the `FileSystem`. A
 request for `/local/%2Fetc%2Fpasswd` — or any other path the open document
 didn't itself embed as an image — now gets the same 404 as a path that
 doesn't exist, whether or not the file is actually present and readable.
-The remaining two hardening steps from the original write-up (a per-instance
-token in the `/local/` path, and rejecting requests with an unexpected
-`Host` header) are not yet implemented; they would still be worth doing to
-close the port-scanning and DNS-rebinding vectors against this and the
-other routes.
+
+**Update:** the first of the two hardening steps from the original
+write-up is done. `DocumentSource` (`crates/mudl-server/src/server.rs`)
+now mints a random 128-bit token per server instance, `document::render`
+embeds it in every generated URL as `/local/<token>/<encoded-path>`
+(`rewrite_local_image_srcs_with_paths` in `crates/mudl-core/src/template.rs`),
+and `serve_local_file` refuses any request whose token doesn't match
+before even checking the allowlist. A party that merely finds the port —
+a local port scan, or a DNS-rebound page guessing it — can no longer ask
+for a `/local/` path cold; the only way to learn a valid token is to have
+already loaded `/` and read it out of that render's own `<img src>`
+values.
+
+**Update:** the second hardening step is done too. `handle_connection`
+(`crates/mudl-server/src/server.rs`) now reads the request's headers (a new
+`read_headers`, capped at `MAX_HEADER_BYTES` the same way the request line
+is capped) and rejects the request with a 403 unless its `Host` header
+names exactly the address the connection was accepted on
+(`host_header_matches`) — closing the DNS-rebinding path where a remote
+page points a hostname it controls at `127.0.0.1` and has the browser
+treat the response as same-origin with that page regardless of what `Host`
+value it sent.
 
 The description below is preserved as the original record of what was
 found.
@@ -121,9 +161,9 @@ free-form paths. Two further hardening steps, cheap and independent:
 ## 3. Script execution from document content
 
 **Severity: critical. Fixed** (the `script-src 'unsafe-inline'` and raw-HTML/
-link-scheme pieces below; `img-src` is unchanged — see Finding 4, still
-open). Verified against a live server instance and the CLI prior to the
-fix.
+link-scheme pieces below; `img-src` is addressed separately — see
+Finding 4). Verified against a live server instance and the CLI prior to
+the fix.
 
 `crate::html_sanitize::sanitize_html` (`crates/mudl-core/src/html_sanitize.rs`)
 now runs over both raw-HTML pass-through sites in
@@ -143,6 +183,12 @@ only. The live-reload bootstrap that needed `'unsafe-inline'` for its
 one-line `var MUDL_VERSION = N;` script now reads a `data-mudl-version`
 attribute on the mode wrapper `<div>` instead (`resources/js/live-reload.js`),
 so no inline script remains anywhere in the served page.
+
+Because the sanitizing happens in `render.rs` rather than in the server,
+it covers `mudl-cli` output too — the reproduction below, re-run against
+`e88708e`, now yields `<img src=x>` (no `onerror`), no `<script>` element,
+and `<a href="#">` in place of the `javascript:` link. See the CLI item
+under Finding 8 for what that leaves.
 
 The description and reproduction below are preserved as the original
 record of what was found.
@@ -207,7 +253,31 @@ where step 2 has nothing to reach.
 
 ## 4. Remote images load unconditionally
 
-**Severity: low**, but it contradicts a documented promise.
+**Severity: low. Fixed.**
+
+`DocumentConfig::allow_remote_images` (`crates/mudl-server/src/document.rs`)
+now defaults to `false`, and `csp_img_src` only admits `https:`/`http:`
+when it's set — otherwise `img-src` is `'self' data:'`. The flag is
+deliberately kept out of `Preferences`: it lives as a per-tab
+`Rc<Cell<bool>>` on `mudl-gui`'s `toolbar::Context`
+(`crates/mudl-gui/src/toolbar.rs`), flipped by the View menu's new "Show
+External Images" item (`crates/mudl-gui/src/menu.rs`) and applied by
+re-navigating the WebView, same as a theme change. Every document opens
+with it off; there's no config path that carries a document's opt-in over
+to the next one, whether that's the same file reopened or a different
+file entirely.
+
+A blocked remote image no longer falls back to the browser's bare
+alt-text rendering, which gave no hint that anything had been hidden:
+`resources/js/mud.js` swaps it for a `.mud-blocked-image` placeholder
+naming the "Show External Images" menu item, decided from the page's own
+CSP `<meta>` tag rather than the browser's `error` event alone (a
+same-URL image the reader had previously allowed could otherwise be
+served from WebKit's cache with no fresh request and no `error` event on
+a later reload with the setting off again).
+
+The description below is preserved as the original record of what was
+found.
 
 `img-src` includes `http:` and `https:`
 (`crates/mudl-server/src/document.rs`), so a document can reference a
@@ -333,58 +403,87 @@ through symlinks before deciding where the temp file goes.
 
 ## 8. Smaller items
 
-- **Unbounded request line** (`handle_connection`,
-  `crates/mudl-server/src/server.rs`). `BufReader::read_line` has no size
-  cap, so a local client that sends bytes without a newline grows the
-  buffer until the process is out of memory. Thread-per-connection is
-  likewise uncapped — the accept loop spawns without limit. Both are
-  local-only denial of service, and both are cheap to bound.
-- **`/local/` serves `.html` as `text/html`** (`crates/mudl-server/src/mime.rs`)
-  on a response that carries no CSP — only the document route embeds the
-  `<meta>` policy. Any HTML file on disk therefore becomes same-origin
-  scriptable content. Responses also lack `X-Content-Type-Options:
-  nosniff`. Both are moot once Finding 2 is confined, but worth fixing in
-  the same pass.
-- **`html_escape` doesn't escape `'`** (`crates/mudl-core/src/encoding.rs`).
-  Safe today only because every attribute this codebase emits is
-  double-quoted; it's a trap for whoever adds the first single-quoted one.
-  Add `&#39;`.
-- **CLI output is an unsanitized fragment.** `render_one`
-  (`crates/mudl-cli/src/main.rs`) never emits a document wrapper, so
-  `mudl -u` output carries no CSP at all while `<script>` and
-  `javascript:` pass straight through (Finding 3). `README.md` advertises
-  the CLI for terminal and script use; anyone rendering untrusted
-  Markdown for publication inherits stored XSS. A `--sanitize` flag, or
-  sanitizing by default with an opt-out, would close it. Separately and
-  not a security issue: `--fragment`/`-f` is parsed in
-  `crates/mudl-cli/src/args.rs` but never read by `render_one`, so it is
-  currently a no-op.
-- **Vendored JavaScript is pinned with no update path.**
-  `resources/js/` carries highlight.js 11.9.0 (2023), Temml 0.13.3, and
-  Mermaid 11.12.3. Both configurable renderers are configured correctly —
-  Mermaid runs at its default `securityLevel: 'strict'` (DOMPurify
-  sanitized) and Temml's `trust` defaults to false, so neither `\href`
-  nor raw HTML labels are live. The concern is staleness: nothing in the
-  build notices when one of these picks up a published advisory.
+- **Unbounded request line — fixed.** (`handle_connection`,
+  `crates/mudl-server/src/server.rs`). The request-line read now goes
+  through `Read::take(MAX_REQUEST_LINE_LEN)` (8 KiB) before `read_line`, so
+  a local client that sends bytes without a newline gets a 400 once the
+  cap is hit rather than growing the buffer without limit. The accept loop
+  (`serve`) now tracks in-flight connections with an `AtomicUsize` and
+  drops (without spawning a thread for) any connection past
+  `MAX_CONCURRENT_CONNECTIONS` (256), closing the socket immediately
+  instead. Both were local-only denial of service; both are covered by new
+  tests in `server.rs`'s `handle_connection_tests`.
+- **`/local/` serves `.html` as `text/html` — fixed.**
+  `rewrite_local_image_srcs_with_paths`
+  (`crates/mudl-core/src/template.rs`) now only adds a resolved path to the
+  allowlist when `mudl_core::images::classify` recognizes its extension as
+  an image type; the `src` is still rewritten to `/local/...` either way,
+  so a document containing `<img src="notes.html">` renders a broken image
+  instead of putting an `.html` path in the allowlist for `/local/` to
+  serve as scriptable same-origin content. Covered by
+  `unrecognized_extension_is_rewritten_but_not_allowlisted` in
+  `template.rs`.
+- **`html_escape` doesn't escape `'` — fixed.**
+  (`crates/mudl-core/src/encoding.rs`). `'` now maps to `&#39;`, the same
+  as the other three specials; `all_five_specials` in `encoding.rs`
+  covers it.
+- **CLI output is an unsanitized fragment — fixed.** Finding 3's sanitizing
+  lives in `render.rs`, which `render_one` (`crates/mudl-cli/src/main.rs`)
+  goes through, so the stored-XSS half of this item was already closed:
+  `<script>`, `on*` handlers, and `javascript:` hrefs don't survive
+  `mudl -u`. The remaining gap was that `render_one` never emitted a
+  document wrapper at all — its output had no CSP and had to be embedded in
+  a page that supplied one — while `--fragment`/`-f` was parsed but never
+  read, so there was no way to *get* a wrapper. `render_one` now wraps its
+  output in a complete document by default (`wrap_full_document`): embedded
+  CSS/JS (no `/assets/` route to reference, so scripts are inlined —
+  content this codebase controls, never document-derived, per Finding 3's
+  own rule), a `Content-Security-Policy` meta tag (`img-src 'self' data:`,
+  matching Finding 4's default), and local images always inlined as data
+  URIs (there's no server to resolve a relative `<img src>` against).
+  `--fragment` now actually does what it always claimed: bare body, no
+  wrapper, matching upstream `mud`'s semantics (Appendix C of
+  `docs/IMPLEMENTATION-PLAN.md`). Covered by
+  `default_output_is_a_complete_html_document`,
+  `fragment_flag_emits_bare_body_with_no_wrapper`, and related tests in
+  `main.rs` and `tests/cli.rs`.
+- **Vendored JavaScript is pinned with no update path — fixed.**
+  `resources/js/` still carries highlight.js 11.9.0 (2023), Temml 0.13.3,
+  and Mermaid 11.12.3 — the same three versions as at `ebab3e7` — and both
+  configurable renderers remain configured correctly: Mermaid runs at its
+  default `securityLevel: 'strict'` (DOMPurify sanitized) and Temml's
+  `trust` defaults to false, so neither `\href` nor raw HTML labels are
+  live. What was missing was staleness *detection*: nothing in the build
+  noticed when one of these picked up a published advisory.
+  `.github/workflows/vendored-js-versions.yml` now runs weekly (and on
+  manual dispatch), extracting the version each vendored file's own
+  banner/metadata claims and diffing it against npm's `latest` dist-tag for
+  the same package — confirmed against the real registry, all three are
+  currently behind (highlight.js 11.12.0, Mermaid 11.17.2, Temml 0.13.5
+  are current as of this fix). It's a separate workflow from `ci.yml`
+  rather than a step in it: a new upstream release isn't a signal that this
+  repo's own change is broken, so it shouldn't gate merges.
 
 
 ## 9. What was checked and found clean
 
-For the record, so a later reviewer doesn't re-derive it:
+For the record, so a later reviewer doesn't re-derive it. Re-confirmed
+against `e88708e`:
 
 - **No `unsafe` outside one audited site.** The only `unsafe` block is
   `pre_exec(|| { libc::setsid(); … })` in
   `crates/mudl-cli/src/main.rs`, which is a correct use of a
   post-fork/pre-exec hook.
 - **No shell interpolation anywhere.** Every `Command::new` call site
-  (`git`, `xdg-open`, the GUI re-exec) passes arguments as separate
-  `arg`/`args` values.
+  passes arguments as separate `arg`/`args` values. Three remain
+  (`xdg-open` and the two re-execs of `mudl` itself); the `git` call sites
+  went with Finding 6's removal.
 - **Asset routing is an allowlist**, not a path lookup
   (`crates/mudl-server/src/assets.rs`), so `/assets/` has no traversal
   surface.
 - **Host-side JavaScript is escaped.** Every `evaluate_javascript` call
-  that embeds document-derived data (outline slugs, change group IDs,
-  comment labels) routes it through
+  that embeds document-derived data (outline slugs and comment labels —
+  the change group IDs went with Finding 6) routes it through
   `mudl_core::template::js_string_literal` first
   (`crates/mudl-gui/src/sidebar.rs`). Find-in-page uses WebKit's native
   `FindController` and interpolates nothing.
@@ -395,4 +494,7 @@ For the record, so a later reviewer doesn't re-derive it:
 - **No panics on hostile input.** 300 pathological documents (nested and
   unterminated delimiters, mixed encodings, embedded NULs, CRLF, astral
   plane characters) rendered through both `-u` and `-d` without a single
-  panic, and the full suite of 815 tests passes.
+  panic. The suite stood at 815 tests then; it is 710 at `e88708e`, all
+  passing — the drop is Finding 6's removal of `mudl-diff` and the
+  change-tracking UI, and the fixes for Findings 2, 3, 5, and 7 each added
+  tests of their own.

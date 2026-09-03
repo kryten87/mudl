@@ -6,6 +6,7 @@ pub fn html_escape(s: &str) -> String {
             '<' => result.push_str("&lt;"),
             '>' => result.push_str("&gt;"),
             '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&#39;"),
             _ => result.push(c),
         }
     }
@@ -60,16 +61,12 @@ mod html_escape_tests {
     }
 
     #[test]
-    fn all_four_specials() {
+    fn all_five_specials() {
         assert_eq!(html_escape("&"), "&amp;");
         assert_eq!(html_escape("<"), "&lt;");
         assert_eq!(html_escape(">"), "&gt;");
         assert_eq!(html_escape("\""), "&quot;");
-    }
-
-    #[test]
-    fn single_quote_not_escaped() {
-        assert_eq!(html_escape("'"), "'");
+        assert_eq!(html_escape("'"), "&#39;");
     }
 
     #[test]

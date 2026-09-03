@@ -8,9 +8,10 @@
 //! traffic (see the plan's rationale in §10, step 4.5).
 
 use std::collections::HashSet;
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -42,6 +43,15 @@ pub struct DocumentSource {
     /// Finding 2: `/local/<path>` used to read and return any path a
     /// request named, with no relation to the document being viewed.
     allowed_local_paths: Mutex<HashSet<PathBuf>>,
+    /// A random token minted once per `DocumentSource` (one per server
+    /// instance — Phase 10.6's "one server per document/tab") and required
+    /// as part of every `/local/<token>/<path>` request. This is
+    /// `docs/SECURITY.md` Finding 2's first hardening step: without it, a
+    /// party that merely finds the port — a local port scan, or a
+    /// DNS-rebound page guessing it — could request `/local/` paths cold.
+    /// With it, the only way to learn a valid token is to have already
+    /// loaded `/` and read it out of that render's own `<img src>` values.
+    local_token: String,
 }
 
 impl DocumentSource {
@@ -50,7 +60,15 @@ impl DocumentSource {
             path,
             config: Mutex::new(DocumentConfig::default()),
             allowed_local_paths: Mutex::new(HashSet::new()),
+            local_token: random_token(),
         }
+    }
+
+    /// The per-instance token every `/local/` request must present
+    /// (`docs/SECURITY.md` Finding 2). `document::render` embeds it in the
+    /// `/local/<token>/<path>` URLs it generates.
+    pub fn local_token(&self) -> &str {
+        &self.local_token
     }
 
     /// Replaces the current rendering config; the next request (or the
@@ -81,6 +99,46 @@ impl DocumentSource {
 /// plausible long-poll interval in practice.
 const WAIT_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Upper bound on the size of a single HTTP request line. No real request
+/// from `mudl-gui`'s WebView or `mudl-cli` needs anywhere near this many
+/// bytes; it exists only to stop a local client that never sends a newline
+/// from growing `handle_connection`'s buffer without limit
+/// (`docs/SECURITY.md` Finding 8, "Unbounded request line").
+const MAX_REQUEST_LINE_LEN: u64 = 8 * 1024;
+
+/// Upper bound on simultaneously in-flight connections. `serve`'s
+/// thread-per-connection accept loop otherwise spawns without limit, so a
+/// local client that opens connections and never closes them could exhaust
+/// threads/memory (`docs/SECURITY.md` Finding 8, "Unbounded request line").
+/// Comfortably above anything a single WebView tab plus long-polls would
+/// ever hold open at once.
+const MAX_CONCURRENT_CONNECTIONS: usize = 256;
+
+/// Upper bound on the total bytes of header lines read after the request
+/// line. Mirrors `MAX_REQUEST_LINE_LEN`'s rationale: reading headers at all
+/// is new (needed for the `Host` check below), so a client that sends
+/// headers without ever terminating them with a blank line needs the same
+/// kind of cap the request line already has.
+const MAX_HEADER_BYTES: u64 = 16 * 1024;
+
+/// Generates a per-instance random token for `DocumentSource::local_token`.
+/// Built from two independently-created `RandomState` hashers rather than a
+/// `rand` dependency: each `RandomState::new()` draws fresh keys from the
+/// OS's own randomness source (see the standard library's
+/// `std::collections::hash_map::RandomState`), so hashing a fixed input
+/// under two of them yields 128 unpredictable bits without pulling in an
+/// external crate for the one thing that needs it.
+fn random_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    let mut high = RandomState::new().build_hasher();
+    high.write_u8(0);
+    let mut low = RandomState::new().build_hasher();
+    low.write_u8(0);
+    format!("{:016x}{:016x}", high.finish(), low.finish())
+}
+
 /// Binds a `TcpListener` on `127.0.0.1`, letting the OS pick a free port.
 /// Call `.local_addr()` on the result to find out which port was chosen.
 pub fn bind() -> io::Result<TcpListener> {
@@ -105,13 +163,25 @@ pub fn serve(
     filesystem: Arc<dyn FileSystem>,
     document: Arc<DocumentSource>,
 ) {
+    let in_flight = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                if in_flight.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_CONNECTIONS {
+                    // Over the cap: drop the connection without spawning a
+                    // thread for it. Closing `stream` here sends the client
+                    // a reset rather than leaving it hanging.
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    continue;
+                }
                 let version = version.clone();
                 let filesystem = Arc::clone(&filesystem);
                 let document = Arc::clone(&document);
-                thread::spawn(move || handle_connection(stream, &version, &filesystem, &document));
+                let in_flight = Arc::clone(&in_flight);
+                thread::spawn(move || {
+                    handle_connection(stream, &version, &filesystem, &document);
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                });
             }
             // A single failed accept (e.g. a connection reset before we
             // could accept it) shouldn't take down the whole server.
@@ -120,29 +190,103 @@ pub fn serve(
     }
 }
 
-/// Reads one HTTP request line from `stream`, dispatches it, and writes
-/// back the response. Errors reading or writing (a client disconnecting
-/// mid-request, say) are swallowed here — there's no one left to report
-/// them to once the connection is already broken.
+/// Reads one HTTP request line and its headers from `stream`, dispatches
+/// the request, and writes back the response. Errors reading or writing (a
+/// client disconnecting mid-request, say) are swallowed here — there's no
+/// one left to report them to once the connection is already broken.
+///
+/// The request-line read is capped at `MAX_REQUEST_LINE_LEN` bytes via
+/// `Read::take`: a client that sends that many bytes without a newline gets
+/// a 400 rather than an unbounded buffer. The header read is capped the
+/// same way, at `MAX_HEADER_BYTES`.
 fn handle_connection(
     mut stream: TcpStream,
     version: &VersionCounter,
     filesystem: &Arc<dyn FileSystem>,
     document: &DocumentSource,
 ) {
+    let local_addr = stream.local_addr().ok();
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return;
-    }
-
-    let response = match http::parse_request_line(&line) {
-        Some(req) => respond_to(&req, version, filesystem.as_ref(), document),
-        None => bad_request(),
+    let read_result = reader
+        .by_ref()
+        .take(MAX_REQUEST_LINE_LEN)
+        .read_line(&mut line);
+    let response = match read_result {
+        Ok(_) if line.ends_with('\n') => match http::parse_request_line(&line) {
+            Some(req) => match read_headers(&mut reader) {
+                Ok(headers) => {
+                    if host_header_matches(&headers, local_addr) {
+                        respond_to(&req, version, filesystem.as_ref(), document)
+                    } else {
+                        forbidden()
+                    }
+                }
+                // A connection that closes, or that never terminates its
+                // headers with a blank line before the cap — malformed
+                // either way.
+                Err(()) => bad_request(),
+            },
+            None => bad_request(),
+        },
+        // Either an I/O error, or the line never ended in a newline within
+        // the cap — treat both as a malformed request rather than reading
+        // further.
+        _ => bad_request(),
     };
 
     let _ = stream.write_all(&response);
     let _ = stream.flush();
+}
+
+/// Reads header lines from `reader` until a blank line terminates them (per
+/// HTTP's header-block syntax), returning the raw `Name: value` lines seen
+/// with no further parsing. `Err(())` covers the connection closing or
+/// `MAX_HEADER_BYTES` being exceeded before that blank line arrives.
+fn read_headers(reader: &mut BufReader<&TcpStream>) -> Result<Vec<String>, ()> {
+    let mut headers = Vec::new();
+    let mut remaining = MAX_HEADER_BYTES;
+    loop {
+        let mut line = String::new();
+        let read = reader
+            .by_ref()
+            .take(remaining)
+            .read_line(&mut line)
+            .map_err(|_| ())?;
+        if read == 0 || !line.ends_with('\n') {
+            return Err(());
+        }
+        remaining = remaining.saturating_sub(read as u64);
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            return Ok(headers);
+        }
+        headers.push(trimmed.to_string());
+    }
+}
+
+/// Looks up a header by name (case-insensitively, per RFC 7230 §3.2) among
+/// raw `Name: value` lines. Returns the first match, trimmed.
+fn header_value<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// Whether the request's `Host` header names exactly the address this
+/// connection was accepted on (`127.0.0.1:<port>`). Closes the
+/// DNS-rebinding half of `docs/SECURITY.md` Finding 2's remaining hardening
+/// step: without this check, a remote page can point a hostname it
+/// controls at `127.0.0.1` and have the browser send that hostname as
+/// `Host` while still connecting to this loopback port, so the response is
+/// treated as same-origin with the attacker's page. A missing `Host`
+/// header, or one naming anything else, is rejected.
+fn host_header_matches(headers: &[String], local_addr: Option<SocketAddr>) -> bool {
+    match (header_value(headers, "Host"), local_addr) {
+        (Some(host), Some(addr)) => host == addr.to_string(),
+        _ => false,
+    }
 }
 
 /// The pure decision logic for turning a parsed request into response
@@ -158,7 +302,7 @@ fn respond_to(
     match routes::dispatch(req) {
         Route::Asset(name) => serve_asset(&name),
         Route::Document(mode) => serve_document(mode, version, filesystem, document),
-        Route::LocalFile(path) => serve_local_file(&path, filesystem, document),
+        Route::LocalFile { token, path } => serve_local_file(&token, &path, filesystem, document),
         Route::WaitForChange(since) => wait_for_change(since, version),
         Route::NotFound => not_found(),
     }
@@ -198,6 +342,7 @@ fn serve_document(
         mode,
         version.current(),
         &config,
+        document.local_token(),
     );
     document.set_allowed_local_paths(allowed_local_paths);
     http::format_response(200, &[("Content-Type", "text/html")], html.as_bytes())
@@ -234,13 +379,20 @@ fn serve_asset(name: &str) -> Vec<u8> {
 /// (§1) that a bare `ENOENT`/`EACCES` distinction from `std::fs` is enough,
 /// with no sandboxed denied-vs-missing distinction to preserve.
 ///
-/// `path` is only read if it's in `document`'s current allowlist — the set
-/// of local paths its last render actually referenced (`docs/SECURITY.md`
-/// Finding 2). Anything else is reported as 404, indistinguishable from a
+/// `token` must match `document`'s own `local_token` (`docs/SECURITY.md`
+/// Finding 2's first hardening step) and `path` must be in `document`'s
+/// current allowlist — the set of local paths its last render actually
+/// referenced. Either failing is reported as 404, indistinguishable from a
 /// path that simply doesn't exist, so a request can't use the response to
-/// probe which files are present versus merely disallowed.
-fn serve_local_file(path: &str, filesystem: &dyn FileSystem, document: &DocumentSource) -> Vec<u8> {
-    if !document.allows_local_path(Path::new(path)) {
+/// probe which files are present versus merely disallowed, or to probe
+/// whether a guessed token is correct.
+fn serve_local_file(
+    token: &str,
+    path: &str,
+    filesystem: &dyn FileSystem,
+    document: &DocumentSource,
+) -> Vec<u8> {
+    if token != document.local_token() || !document.allows_local_path(Path::new(path)) {
         return not_found();
     }
     match filesystem.read(Path::new(path)) {
@@ -267,6 +419,10 @@ fn bad_request() -> Vec<u8> {
     http::format_response(400, &[("Content-Type", "text/plain")], b"Bad Request")
 }
 
+fn forbidden() -> Vec<u8> {
+    http::format_response(403, &[("Content-Type", "text/plain")], b"Forbidden")
+}
+
 #[cfg(test)]
 mod respond_to_tests {
     use super::*;
@@ -289,6 +445,13 @@ mod respond_to_tests {
             path: path.to_string(),
             query: HashMap::new(),
         }
+    }
+
+    /// Builds a `/local/<token>/<encoded_path>` request against `document`'s
+    /// actual `local_token`, matching what a real rendered page's `<img
+    /// src>` would contain.
+    fn local_req(document: &DocumentSource, encoded_path: &str) -> Request {
+        req(&format!("/local/{}/{encoded_path}", document.local_token()))
     }
 
     fn wait_req(since: u64) -> Request {
@@ -448,7 +611,7 @@ mod respond_to_tests {
         render_document_first(&version, &filesystem, &document);
 
         let response = respond_to(
-            &req("/local/%2Fdocs%2Fphoto.png"),
+            &local_req(&document, "%2Fdocs%2Fphoto.png"),
             &version,
             &filesystem,
             &document,
@@ -461,6 +624,27 @@ mod respond_to_tests {
     }
 
     #[test]
+    fn local_file_route_with_wrong_token_is_404_even_when_path_is_allowed() {
+        // Second half of Finding 2's hardening: even a path the document
+        // legitimately references must not be served if the request's
+        // token doesn't match this `DocumentSource`'s own.
+        let version = VersionCounter::new();
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", b"![alt](photo.png)".to_vec());
+        filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
+        let document = document_source();
+        render_document_first(&version, &filesystem, &document);
+
+        let response = respond_to(
+            &req("/local/wrong-token/%2Fdocs%2Fphoto.png"),
+            &version,
+            &filesystem,
+            &document,
+        );
+        assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
+    }
+
+    #[test]
     fn local_file_route_absent_from_filesystem_is_404() {
         let version = VersionCounter::new();
         let filesystem = InMemoryFileSystem::new();
@@ -469,7 +653,7 @@ mod respond_to_tests {
         render_document_first(&version, &filesystem, &document);
 
         let response = respond_to(
-            &req("/local/%2Fdocs%2Fmissing.md"),
+            &local_req(&document, "%2Fdocs%2Fmissing.md"),
             &version,
             &filesystem,
             &document,
@@ -490,7 +674,7 @@ mod respond_to_tests {
         render_document_first(&version, &filesystem, &document);
 
         let response = respond_to(
-            &req("/local/%2Fetc%2Fpasswd"),
+            &local_req(&document, "%2Fetc%2Fpasswd"),
             &version,
             &filesystem,
             &document,
@@ -503,12 +687,13 @@ mod respond_to_tests {
         let version = VersionCounter::new();
         let filesystem = InMemoryFileSystem::new();
         filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
+        let document = document_source();
 
         let response = respond_to(
-            &req("/local/%2Fdocs%2Fphoto.png"),
+            &local_req(&document, "%2Fdocs%2Fphoto.png"),
             &version,
             &filesystem,
-            &document_source(),
+            &document,
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
@@ -545,5 +730,110 @@ mod respond_to_tests {
         );
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert_eq!(body_of(&response), r#"{"version":0}"#);
+    }
+}
+
+#[cfg(test)]
+mod handle_connection_tests {
+    use super::*;
+    use crate::fs::InMemoryFileSystem;
+
+    /// Runs `handle_connection` against a real loopback socket: spawns an
+    /// acceptor thread that reads one connection and hands it to
+    /// `handle_connection`, connects a client, writes whatever
+    /// `build_request` returns (given the address the server actually bound
+    /// to, so a test can put a correct `Host` header in it), and returns
+    /// whatever came back before the acceptor thread closes the socket.
+    fn run_request(build_request: impl FnOnce(SocketAddr) -> Vec<u8>) -> Vec<u8> {
+        let listener = bind().unwrap();
+        let addr = listener.local_addr().unwrap();
+        let version = VersionCounter::new();
+        let filesystem: Arc<dyn FileSystem> = Arc::new(InMemoryFileSystem::new());
+        let document = Arc::new(DocumentSource::new(PathBuf::from("/docs/notes.md")));
+
+        let acceptor = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, &version, &filesystem, &document);
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let mut writer = client.try_clone().unwrap();
+        let request_bytes = build_request(addr);
+        // Writes on their own thread: once the server has read enough to
+        // decide the request is malformed (the oversized-request-line
+        // case), it responds and closes its side without draining the
+        // rest of `request_bytes`, which can otherwise turn the write into
+        // a `ConnectionReset` on this end. The read below only needs
+        // whatever the server sends back.
+        let writer_thread = thread::spawn(move || {
+            let _ = writer.write_all(&request_bytes);
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+        });
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        acceptor.join().unwrap();
+        let _ = writer_thread.join();
+        response
+    }
+
+    /// A well-formed `GET <path>` request carrying a `Host` header that
+    /// matches wherever `run_request` actually bound its test server —
+    /// what a real WebView's request looks like.
+    fn get_with_correct_host(path: &str) -> Vec<u8> {
+        run_request(|addr| format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n").into_bytes())
+    }
+
+    #[test]
+    fn ordinary_request_line_is_served_normally() {
+        let response = get_with_correct_host("/assets/mud.css");
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+    }
+
+    #[test]
+    fn request_line_over_the_cap_with_no_newline_is_a_400() {
+        // Exactly `MAX_REQUEST_LINE_LEN` bytes, no trailing newline at all —
+        // sending anything past the cap would leave unread bytes in the
+        // socket when the server closes it, which triggers a spurious
+        // `ConnectionReset` on this end rather than exercising the cap.
+        let response = run_request(|_addr| vec![b'a'; MAX_REQUEST_LINE_LEN as usize]);
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 400 Bad Request"), "{text}");
+    }
+
+    #[test]
+    fn headers_over_the_cap_with_no_terminating_blank_line_is_a_400() {
+        // Same shape as the request-line cap, for the header read added to
+        // support the `Host` check: a header block that never reaches its
+        // terminating blank line within `MAX_HEADER_BYTES` is malformed,
+        // not something to keep reading forever.
+        let response = run_request(|_addr| {
+            let mut request = b"GET / HTTP/1.1\r\n".to_vec();
+            request.extend(vec![b'a'; MAX_HEADER_BYTES as usize]);
+            request
+        });
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 400 Bad Request"), "{text}");
+    }
+
+    #[test]
+    fn missing_host_header_is_403() {
+        let response = run_request(|_addr| b"GET /assets/mud.css HTTP/1.1\r\n\r\n".to_vec());
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 403 Forbidden"), "{text}");
+    }
+
+    #[test]
+    fn host_header_naming_a_different_address_is_403() {
+        // Regression test for `docs/SECURITY.md` Finding 2's DNS-rebinding
+        // vector: a remote page can point a hostname it controls at
+        // 127.0.0.1 and have the browser send that hostname as `Host` while
+        // still connecting to this loopback port. Rejecting any `Host` that
+        // doesn't name the bound address closes it.
+        let response = run_request(|_addr| {
+            b"GET /assets/mud.css HTTP/1.1\r\nHost: evil.example\r\n\r\n".to_vec()
+        });
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 403 Forbidden"), "{text}");
     }
 }

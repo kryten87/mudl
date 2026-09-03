@@ -534,6 +534,15 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
 
     menu.append(&gtk::SeparatorMenuItem::new());
 
+    // `docs/SECURITY.md` Finding 4: off by default and per-tab (never
+    // written to `Preferences`), so a document opened later doesn't
+    // silently inherit an earlier document's opt-in.
+    let show_external_images = gtk::CheckMenuItem::with_label("Show External Images");
+    connect_show_external_images(&show_external_images, ctx);
+    menu.append(&show_external_images);
+
+    menu.append(&gtk::SeparatorMenuItem::new());
+
     let actual_size = gtk::MenuItem::with_label("Actual Size");
     add_accel(&actual_size, accel_group, key::_0, Mod::CONTROL_MASK);
     connect_actual_size(&actual_size, ctx);
@@ -559,6 +568,7 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
             readable_column,
             line_numbers,
             word_wrap,
+            show_external_images,
         },
     );
 
@@ -578,6 +588,7 @@ struct ViewMenuCheckables {
     readable_column: gtk::CheckMenuItem,
     line_numbers: gtk::CheckMenuItem,
     word_wrap: gtk::CheckMenuItem,
+    show_external_images: gtk::CheckMenuItem,
 }
 
 /// Resyncs the checkable View items from the current tab's true state
@@ -593,6 +604,7 @@ fn connect_view_menu_show(menu: &gtk::Menu, ctx: &Context, checkables: ViewMenuC
         readable_column,
         line_numbers,
         word_wrap,
+        show_external_images,
     } = checkables;
     menu.connect_show(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
@@ -616,6 +628,7 @@ fn connect_view_menu_show(menu: &gtk::Menu, ctx: &Context, checkables: ViewMenuC
             readable_column.set_active(readable_column_active);
             line_numbers.set_active(line_numbers_active);
             word_wrap.set_active(word_wrap_active);
+            show_external_images.set_active(tab.toolbar_ctx.allow_remote_images.get());
             match mode {
                 Mode::Up => mark_up.set_active(true),
                 Mode::Down => mark_down.set_active(true),
@@ -668,6 +681,17 @@ fn connect_word_wrap(check: &gtk::CheckMenuItem, ctx: &Context) {
         let active = check.is_active();
         with_current_tab(&tabs, &notebook, |tab| {
             toolbar::set_word_wrap(&tab.toolbar_ctx, active);
+        });
+    });
+}
+
+fn connect_show_external_images(check: &gtk::CheckMenuItem, ctx: &Context) {
+    let tabs = Rc::clone(&ctx.tabs);
+    let notebook = ctx.notebook.clone();
+    check.connect_toggled(move |check| {
+        let active = check.is_active();
+        with_current_tab(&tabs, &notebook, |tab| {
+            toolbar::set_allow_remote_images(&tab.toolbar_ctx, active);
         });
     });
 }

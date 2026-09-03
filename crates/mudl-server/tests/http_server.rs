@@ -24,21 +24,29 @@ const DOCUMENT_PATH: &str = "/docs/notes.md";
 /// along with the `VersionCounter` it was wired up with, so a test can bump
 /// it programmatically.
 fn start_server() -> (SocketAddr, VersionCounter) {
-    start_server_with_fs(Arc::new(InMemoryFileSystem::new()))
+    let (addr, version, _document) = start_server_with_fs(Arc::new(InMemoryFileSystem::new()));
+    (addr, version)
 }
 
 /// Same as `start_server`, but with a caller-supplied filesystem, for tests
-/// that exercise `/local/<path>` (or `/`) against known fake contents.
-fn start_server_with_fs(filesystem: Arc<dyn FileSystem>) -> (SocketAddr, VersionCounter) {
+/// that exercise `/local/<token>/<path>` (or `/`) against known fake
+/// contents. Also returns the `DocumentSource` handle so a test can read its
+/// `local_token()` — the same way a real rendered page's `<img src>` would
+/// carry it — to build a valid `/local/` request (`docs/SECURITY.md`
+/// Finding 2's first hardening step).
+fn start_server_with_fs(
+    filesystem: Arc<dyn FileSystem>,
+) -> (SocketAddr, VersionCounter, Arc<DocumentSource>) {
     let listener = mudl_server::server::bind().expect("failed to bind test server");
     let addr = listener.local_addr().expect("failed to read local addr");
     let version = VersionCounter::new();
     let server_version = version.clone();
     let document = Arc::new(DocumentSource::new(PathBuf::from(DOCUMENT_PATH)));
+    let document_for_server = Arc::clone(&document);
     thread::spawn(move || {
-        mudl_server::server::serve(listener, server_version, filesystem, document)
+        mudl_server::server::serve(listener, server_version, filesystem, document_for_server)
     });
-    (addr, version)
+    (addr, version, document)
 }
 
 /// Sends a raw `GET <path> HTTP/1.1` request and returns the full response
@@ -48,7 +56,10 @@ fn get(addr: SocketAddr, path: &str) -> Vec<u8> {
     // yet the instant it's spawned; retry the connect briefly rather than
     // introducing a flaky fixed sleep.
     let mut stream = connect_with_retry(addr);
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // `Host` has to name exactly the address the server bound to
+    // (`docs/SECURITY.md` Finding 2's `Host`-check hardening step) — a real
+    // WebView navigating to `http://127.0.0.1:<port>/` sends exactly this.
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .expect("failed to write request");
@@ -133,7 +144,7 @@ fn document_route_missing_file_is_404() {
 fn document_route_renders_the_configured_file() {
     let filesystem = InMemoryFileSystem::new();
     filesystem.insert(DOCUMENT_PATH, b"# Hello".to_vec());
-    let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
+    let (addr, _version, _document) = start_server_with_fs(Arc::new(filesystem));
 
     let response = get(addr, "/");
     let (head, body) = split_head_and_body(&response);
@@ -150,14 +161,17 @@ fn local_file_route_serves_bytes_present_in_the_filesystem_and_referenced_by_the
     let filesystem = InMemoryFileSystem::new();
     filesystem.insert(DOCUMENT_PATH, b"![alt](photo.png)".to_vec());
     filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
-    let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
+    let (addr, _version, document) = start_server_with_fs(Arc::new(filesystem));
 
     // The document has to be rendered at least once before its allowlist
     // (the set of local paths its own images resolved to) is populated —
     // exactly what a real WebView does by loading `/` before requesting
     // any `/local/` image it found there.
     get(addr, "/");
-    let response = get(addr, "/local/%2Fdocs%2Fphoto.png");
+    let response = get(
+        addr,
+        &format!("/local/{}/%2Fdocs%2Fphoto.png", document.local_token()),
+    );
     let (head, body) = split_head_and_body(&response);
 
     assert!(head.starts_with("HTTP/1.1 200 OK"));
@@ -169,10 +183,13 @@ fn local_file_route_serves_bytes_present_in_the_filesystem_and_referenced_by_the
 fn local_file_route_missing_from_filesystem_is_404() {
     let filesystem = InMemoryFileSystem::new();
     filesystem.insert(DOCUMENT_PATH, b"![alt](missing.md)".to_vec());
-    let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
+    let (addr, _version, document) = start_server_with_fs(Arc::new(filesystem));
 
     get(addr, "/");
-    let response = get(addr, "/local/%2Fdocs%2Fmissing.md");
+    let response = get(
+        addr,
+        &format!("/local/{}/%2Fdocs%2Fmissing.md", document.local_token()),
+    );
     let (head, _body) = split_head_and_body(&response);
 
     assert!(head.starts_with("HTTP/1.1 404 Not Found"));
@@ -188,13 +205,53 @@ fn local_file_route_not_referenced_by_the_document_is_404_even_when_present_on_d
     let filesystem = InMemoryFileSystem::new();
     filesystem.insert(DOCUMENT_PATH, b"no images here".to_vec());
     filesystem.insert("/etc/passwd", b"root:x:0:0::/root:/bin/bash".to_vec());
-    let (addr, _version) = start_server_with_fs(Arc::new(filesystem));
+    let (addr, _version, document) = start_server_with_fs(Arc::new(filesystem));
 
     get(addr, "/");
-    let response = get(addr, "/local/%2Fetc%2Fpasswd");
+    let response = get(
+        addr,
+        &format!("/local/{}/%2Fetc%2Fpasswd", document.local_token()),
+    );
     let (head, _body) = split_head_and_body(&response);
 
     assert!(head.starts_with("HTTP/1.1 404 Not Found"));
+}
+
+#[test]
+fn local_file_route_with_wrong_token_is_404_even_when_path_is_allowed() {
+    // Second half of `docs/SECURITY.md` Finding 2's first hardening step:
+    // even a path the document legitimately references must not be served
+    // if the request's token doesn't match this server instance's own.
+    let filesystem = InMemoryFileSystem::new();
+    filesystem.insert(DOCUMENT_PATH, b"![alt](photo.png)".to_vec());
+    filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
+    let (addr, _version, _document) = start_server_with_fs(Arc::new(filesystem));
+
+    get(addr, "/");
+    let response = get(addr, "/local/wrong-token/%2Fdocs%2Fphoto.png");
+    let (head, _body) = split_head_and_body(&response);
+
+    assert!(head.starts_with("HTTP/1.1 404 Not Found"));
+}
+
+#[test]
+fn request_with_host_header_naming_a_different_address_is_403() {
+    // Regression test for `docs/SECURITY.md` Finding 2's DNS-rebinding
+    // vector: a remote page can point a hostname it controls at
+    // 127.0.0.1 and have the browser send that hostname as `Host` while
+    // still connecting to this loopback port.
+    let (addr, _version) = start_server();
+    let mut stream = connect_with_retry(addr);
+    stream
+        .write_all(b"GET /assets/mud.css HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+        .expect("failed to write request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("failed to read response");
+    let (head, _body) = split_head_and_body(&response);
+
+    assert!(head.starts_with("HTTP/1.1 403 Forbidden"));
 }
 
 #[test]

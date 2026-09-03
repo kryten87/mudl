@@ -10,6 +10,8 @@ use installer::RealFileSystem as InstallerFileSystem;
 use mudl_core::images::rewrite_srcs_to_data_uris;
 use mudl_core::options::RenderOptions;
 use mudl_core::render::{render_down, render_up};
+use mudl_core::resources;
+use mudl_core::template::{select_assets, HtmlDocument, Script};
 
 const HELP_TEXT: &str = "\
 mudl - A Perfect Markdown Viewer
@@ -22,8 +24,11 @@ FLAGS:
     -v, --version           Print the version and exit
     -u, --html-up           Render Up-mode (styled) HTML to stdout
     -d, --html-down         Render Down-mode (raw source) HTML to stdout
-        --standalone        Inline local images as data URIs
+        --standalone        Inline local images as data URIs (implied by the
+                             default full-document output; only meaningful
+                             together with --fragment)
     -f, --fragment          Emit body-only HTML, no document wrapper
+                             (default: a complete, self-contained document)
         --line-numbers      Show line numbers (Down mode)
         --word-wrap         Wrap long lines (Down mode)
         --readable-column   Constrain body width to a readable column
@@ -164,7 +169,7 @@ fn render(
             return ExitCode::from(2);
         }
         let base_dir = std::env::current_dir().unwrap_or_default();
-        let html = render_one(&markdown, &base_dir, render_args, &options);
+        let html = render_one(&markdown, &base_dir, "", render_args, &options);
         let _ = writeln!(stdout, "{html}");
         return ExitCode::SUCCESS;
     }
@@ -179,16 +184,33 @@ fn render(
             }
         };
         let base_dir = path.parent().unwrap_or(std::path::Path::new("."));
-        let html = render_one(&markdown, base_dir, render_args, &options);
+        let title = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let html = render_one(&markdown, base_dir, &title, render_args, &options);
         let _ = writeln!(stdout, "{html}");
     }
 
     ExitCode::SUCCESS
 }
 
+/// Renders one document's body, then — unless `--fragment` asked for the
+/// bare body — wraps it into a complete, self-contained HTML document
+/// (`docs/SECURITY.md` Finding 8, "CLI output is an unsanitized fragment":
+/// the fragment shape itself was fine, since Finding 3's sanitizing already
+/// covers it, but it meant the CLI's default output had no document wrapper
+/// at all — matching upstream `mud`'s `--fragment` semantics, Appendix C of
+/// `docs/IMPLEMENTATION-PLAN.md`, needed the wrapper to actually exist).
+///
+/// The full-document path always inlines local images as data URIs — same
+/// as `--standalone` — because there's no server here to resolve a relative
+/// `<img src>` against, so `--standalone` only has an independent effect in
+/// `--fragment` mode.
 fn render_one(
     markdown: &str,
     base_dir: &std::path::Path,
+    title: &str,
     render_args: &RenderArgs,
     options: &RenderOptions,
 ) -> String {
@@ -196,11 +218,92 @@ fn render_one(
         Mode::Up => render_up(markdown, options),
         Mode::Down => render_down(markdown, options),
     };
-    if render_args.standalone {
+    let body = if render_args.standalone || !render_args.fragment {
         rewrite_srcs_to_data_uris(&body, base_dir, &|p| std::fs::read(p))
     } else {
         body
+    };
+
+    if render_args.fragment {
+        body
+    } else {
+        wrap_full_document(&body, title, render_args, options)
     }
+}
+
+/// Assembles a complete, self-contained HTML document around an already-
+/// rendered (and, per `render_one`, already image-inlined) body: embedded
+/// styles/scripts rather than `/assets/` references, since there's no
+/// server here to serve them from.
+fn wrap_full_document(
+    body: &str,
+    title: &str,
+    render_args: &RenderArgs,
+    options: &RenderOptions,
+) -> String {
+    let wrapper_class = match render_args.mode {
+        Mode::Up => "up-mode-output",
+        Mode::Down => "down-mode-output",
+    };
+    let wrapped_body = format!("<div class=\"{wrapper_class}\">{body}</div>");
+
+    let selection = select_assets(&wrapped_body, options);
+
+    let mode_css = match render_args.mode {
+        Mode::Up => resources::MUD_UP_CSS,
+        Mode::Down => resources::MUD_DOWN_CSS,
+    };
+    let mut styles = vec![resources::MUD_CSS.to_string(), mode_css.to_string()];
+    let theme_name = render_args.theme.as_deref().unwrap_or("earthy");
+    if let Some(theme_css) = resources::lookup(&format!("theme-{theme_name}.css")) {
+        styles.push(theme_css.to_string());
+    }
+    for name in &selection.stylesheets {
+        if let Some(css) = resources::lookup(name) {
+            styles.push(css.to_string());
+        }
+    }
+
+    // No server backs this file, so every script is inlined rather than
+    // referenced by `src=` — there's no `/assets/` route to point at. This
+    // is still safe under Finding 3's "no script from document content"
+    // rule: these are our own fixed, bundled scripts, selected only by
+    // which content markers are present, never markdown/HTML the document
+    // supplied.
+    let scripts: Vec<Script> = selection
+        .scripts
+        .iter()
+        .filter_map(|name| resources::lookup(name))
+        .map(|src| Script::Inline(src.to_string()))
+        .collect();
+
+    let mut html_classes = Vec::new();
+    if render_args.line_numbers {
+        html_classes.push("has-line-numbers".to_string());
+    }
+    if render_args.word_wrap {
+        html_classes.push("has-word-wrap".to_string());
+    }
+    if render_args.readable_column {
+        html_classes.push("is-readable-column".to_string());
+    }
+
+    let doc = HtmlDocument {
+        title: title.to_string(),
+        base_href: None,
+        styles,
+        // `'self' data:`, matching the GUI server's default
+        // (`docs/SECURITY.md` Finding 4): remote images stay blocked, and
+        // `data:` is what makes this file's own (already inlined) local
+        // images visible.
+        csp_img_src: vec!["'self'".to_string(), "data:".to_string()],
+        csp_script_src: vec!["'unsafe-inline'".to_string()],
+        html_classes,
+        zoom_level: 1.0,
+        body_content: wrapped_body,
+        body_scripts: scripts,
+    };
+    doc.render()
 }
 
 #[cfg(test)]
@@ -271,5 +374,48 @@ mod tests {
         let (code, stdout, _) = run_with(&args(&["-d"]), "line one");
         assert_eq!(code, ExitCode::SUCCESS);
         assert!(stdout.contains("line one"));
+    }
+
+    #[test]
+    fn default_output_is_a_complete_html_document() {
+        let (code, stdout, _) = run_with(&args(&["-u"]), "# Hello");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(stdout.starts_with("<!DOCTYPE html>"));
+        assert!(stdout.contains("<html"));
+        assert!(stdout.contains("Content-Security-Policy"));
+        assert!(stdout.contains("<h1"));
+        assert!(stdout.trim_end().ends_with("</html>"));
+    }
+
+    #[test]
+    fn fragment_flag_emits_bare_body_with_no_wrapper() {
+        let (code, stdout, _) = run_with(&args(&["-u", "--fragment"]), "# Hello");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!stdout.contains("<!DOCTYPE"));
+        assert!(!stdout.contains("<html"));
+        assert!(stdout.contains("<h1"));
+    }
+
+    #[test]
+    fn fragment_short_flag_is_equivalent() {
+        let (code, stdout, _) = run_with(&args(&["-u", "-f"]), "# Hello");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(!stdout.contains("<!DOCTYPE"));
+    }
+
+    #[test]
+    fn default_output_embeds_the_selected_theme() {
+        let (code, stdout, _) = run_with(&args(&["-u", "--theme", "riot"]), "# Hello");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(stdout.contains("Theme: Riot"));
+    }
+
+    #[test]
+    fn default_output_applies_line_numbers_and_word_wrap_classes() {
+        let (code, stdout, _) =
+            run_with(&args(&["-d", "--line-numbers", "--word-wrap"]), "line one");
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(stdout.contains("has-line-numbers"));
+        assert!(stdout.contains("has-word-wrap"));
     }
 }

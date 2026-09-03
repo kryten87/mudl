@@ -44,9 +44,25 @@ pub struct Context {
     pub prefs_path: PathBuf,
     pub document: Arc<DocumentSource>,
     pub addr: SocketAddr,
+    /// Per-tab "Show External Images" opt-in (`docs/SECURITY.md` Finding
+    /// 4). Deliberately not part of `Preferences`: it must reset to `false`
+    /// every time a document is (re)opened rather than becoming a silent
+    /// standing default, so it lives here instead of being written to disk
+    /// by `save_and_apply`.
+    pub allow_remote_images: Rc<Cell<bool>>,
 }
 
 impl Context {
+    /// Builds the document config the running server should render with:
+    /// the prefs-derived settings plus this tab's own remote-images opt-in,
+    /// which `config::document_config` never sees since it isn't sourced
+    /// from `Preferences`.
+    fn current_document_config(&self) -> mudl_server::document::DocumentConfig {
+        let mut document_config = config::document_config(&self.prefs.borrow());
+        document_config.allow_remote_images = self.allow_remote_images.get();
+        document_config
+    }
+
     /// Writes the in-memory preferences to disk and updates the running
     /// server's rendering config, so both a relaunch and the next
     /// mode-toggle/reload reflect the change. Save errors are swallowed —
@@ -55,7 +71,7 @@ impl Context {
     fn save_and_apply(&self) {
         let prefs = self.prefs.borrow();
         let _ = mudl_config::save(&mudl_config::RealFileSystem, &self.prefs_path, &prefs);
-        self.document.set_config(config::document_config(&prefs));
+        self.document.set_config(self.current_document_config());
     }
 
     fn document_url(&self) -> String {
@@ -150,6 +166,20 @@ pub fn set_readable_column(ctx: &Context, active: bool) {
     ctx.prefs.borrow_mut().ui_show_readable_column = active;
     toggle_root_class(&ctx.webview, "is-readable-column", active);
     ctx.save_and_apply();
+}
+
+/// Sets this tab's "Show External Images" opt-in (`docs/SECURITY.md`
+/// Finding 4) and applies it live. Used by the menu's "Show External
+/// Images" item — there's no toolbar button for this. Deliberately doesn't
+/// go through `save_and_apply`: this flag isn't part of `Preferences` and
+/// must never be persisted, so a later document doesn't inherit today's
+/// opt-in with no prompt. Like the theme, `img-src` is baked into the
+/// server-rendered page's CSP `<meta>` tag, so applying it live means
+/// re-navigating rather than injecting a script.
+pub fn set_allow_remote_images(ctx: &Context, allow: bool) {
+    ctx.allow_remote_images.set(allow);
+    ctx.document.set_config(ctx.current_document_config());
+    ctx.webview.load_uri(&ctx.document_url());
 }
 
 /// Adds or removes `class` on `<html>` in the live page — the `mud`
