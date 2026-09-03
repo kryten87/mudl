@@ -18,7 +18,7 @@ Current status:
 |---|---------|----------|--------|
 | 2 | Arbitrary local file read over the HTTP server | critical | **Fixed**; two hardening steps still open |
 | 3 | Script execution from document content | critical | **Fixed** |
-| 4 | Remote images load unconditionally | low | **Open** |
+| 4 | Remote images load unconditionally | low | **Fixed** |
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
 | 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal) |
 | 7 | Atomic writes drop permissions and follow symlinks | low-medium | **Fixed** |
@@ -148,9 +148,9 @@ free-form paths. Two further hardening steps, cheap and independent:
 ## 3. Script execution from document content
 
 **Severity: critical. Fixed** (the `script-src 'unsafe-inline'` and raw-HTML/
-link-scheme pieces below; `img-src` is unchanged — see Finding 4, still
-open). Verified against a live server instance and the CLI prior to the
-fix.
+link-scheme pieces below; `img-src` is addressed separately — see
+Finding 4). Verified against a live server instance and the CLI prior to
+the fix.
 
 `crate::html_sanitize::sanitize_html` (`crates/mudl-core/src/html_sanitize.rs`)
 now runs over both raw-HTML pass-through sites in
@@ -240,12 +240,22 @@ where step 2 has nothing to reach.
 
 ## 4. Remote images load unconditionally
 
-**Severity: low. Open** — re-verified against `e88708e`:
-`crates/mudl-server/src/document.rs` still sets `csp_img_src` to `'self'
-https: http: data:`, and `README.md:26` still carries the "no network
-requests" line. This is the only original finding that is unchanged.
+**Severity: low. Fixed.**
 
-It contradicts a documented promise.
+`DocumentConfig::allow_remote_images` (`crates/mudl-server/src/document.rs`)
+now defaults to `false`, and `csp_img_src` only admits `https:`/`http:`
+when it's set — otherwise `img-src` is `'self' data:'`. The flag is
+deliberately kept out of `Preferences`: it lives as a per-tab
+`Rc<Cell<bool>>` on `mudl-gui`'s `toolbar::Context`
+(`crates/mudl-gui/src/toolbar.rs`), flipped by the View menu's new "Show
+External Images" item (`crates/mudl-gui/src/menu.rs`) and applied by
+re-navigating the WebView, same as a theme change. Every document opens
+with it off; there's no config path that carries a document's opt-in over
+to the next one, whether that's the same file reopened or a different
+file entirely.
+
+The description below is preserved as the original record of what was
+found.
 
 `img-src` includes `http:` and `https:`
 (`crates/mudl-server/src/document.rs`), so a document can reference a

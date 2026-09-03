@@ -25,6 +25,10 @@ pub fn document_config(prefs: &Preferences) -> DocumentConfig {
         show_line_numbers: prefs.down_mode_show_line_numbers,
         wrap_lines: prefs.down_mode_wrap_lines,
         readable_column: prefs.ui_show_readable_column,
+        // Never sourced from `Preferences` (`docs/SECURITY.md` Finding 4) —
+        // `toolbar::Context::current_document_config` overrides this from
+        // the tab's own per-open in-memory opt-in.
+        allow_remote_images: false,
     }
 }
 

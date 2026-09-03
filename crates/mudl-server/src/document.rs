@@ -47,6 +47,14 @@ pub struct DocumentConfig {
     /// Both modes' `is-readable-column` root class (`mud-up.css`/
     /// `mud-down.css`).
     pub readable_column: bool,
+    /// Per-tab, in-memory opt-in for `docs/SECURITY.md` Finding 4: when
+    /// `false` (the default), `csp_img_src` omits `https:`/`http:`, so a
+    /// remote image can't be used as an open-time tracking beacon. Never
+    /// sourced from `Preferences` — `mudl-gui`'s "Show External Images"
+    /// menu item flips this live via `DocumentSource::set_config` and
+    /// leaves it out of what gets written to the preferences file, so it
+    /// resets to `false` every time a document is (re)opened.
+    pub allow_remote_images: bool,
 }
 
 impl Default for DocumentConfig {
@@ -59,6 +67,7 @@ impl Default for DocumentConfig {
             show_line_numbers: true,
             wrap_lines: true,
             readable_column: false,
+            allow_remote_images: false,
         }
     }
 }
@@ -116,12 +125,7 @@ pub fn render(
         title: title.to_string(),
         base_href: None,
         styles,
-        csp_img_src: vec![
-            "'self'".to_string(),
-            "https:".to_string(),
-            "http:".to_string(),
-            "data:".to_string(),
-        ],
+        csp_img_src: csp_img_src(config),
         // No `'unsafe-inline'` (`docs/SECURITY.md` Finding 3): every script
         // this page runs is loaded from `/assets/`, and the live-reload
         // version it used to need an inline bootstrap for now travels as
@@ -136,6 +140,19 @@ pub fn render(
         body_scripts: scripts,
     };
     (doc.render(), allowed_local_paths)
+}
+
+/// `'self' data:` by default (`docs/SECURITY.md` Finding 4); adds
+/// `https:`/`http:` only when `config.allow_remote_images` opts in for this
+/// tab.
+fn csp_img_src(config: &DocumentConfig) -> Vec<String> {
+    let mut sources = vec!["'self'".to_string()];
+    if config.allow_remote_images {
+        sources.push("https:".to_string());
+        sources.push("http:".to_string());
+    }
+    sources.push("data:".to_string());
+    sources
 }
 
 /// The `<html>` root classes matching Phase 10.4's toggle-button state,
@@ -378,6 +395,30 @@ mod tests {
         );
         let classes = html_root_class_attr(&html);
         assert_eq!(classes, "has-line-numbers has-word-wrap");
+    }
+
+    #[test]
+    fn img_src_excludes_remote_schemes_by_default() {
+        let (html, _) = render(
+            "hi",
+            base_dir(),
+            "notes.md",
+            Mode::Up,
+            0,
+            &DocumentConfig::default(),
+        );
+        assert!(html.contains("img-src 'self' data:"));
+        assert!(!html.contains("img-src 'self' https:"));
+    }
+
+    #[test]
+    fn img_src_includes_remote_schemes_when_allowed() {
+        let config = DocumentConfig {
+            allow_remote_images: true,
+            ..DocumentConfig::default()
+        };
+        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config);
+        assert!(html.contains("img-src 'self' https: http: data:"));
     }
 
     #[test]
