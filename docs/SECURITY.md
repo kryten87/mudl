@@ -22,7 +22,7 @@ Current status:
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
 | 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal) |
 | 7 | Atomic writes drop permissions and follow symlinks | low-medium | **Fixed** |
-| 8 | Smaller items | — | One fixed, two open, one partly fixed, one reduced |
+| 8 | Smaller items | — | Two fixed, two open, one partly fixed |
 
 
 ## 1. Threat model
@@ -400,20 +400,16 @@ through symlinks before deciding where the temp file goes.
   `MAX_CONCURRENT_CONNECTIONS` (256), closing the socket immediately
   instead. Both were local-only denial of service; both are covered by new
   tests in `server.rs`'s `handle_connection_tests`.
-- **`/local/` serves `.html` as `text/html` — open, reduced.**
-  (`crates/mudl-server/src/mime.rs`) on a response that carries no CSP —
-  only the document route embeds the `<meta>` policy — and with no
-  `X-Content-Type-Options: nosniff`. Finding 2's allowlist shrinks this
-  from "any HTML file on disk" to "an HTML file the open document embedded
-  as an image", but does not close it:
+- **`/local/` serves `.html` as `text/html` — fixed.**
   `rewrite_local_image_srcs_with_paths`
-  (`crates/mudl-core/src/template.rs:293`) admits any non-external `src`
-  without consulting `mudl_core::images::classify`'s extension set, so a
-  document containing `<img src="notes.html">` still puts an `.html` path
-  in the allowlist, where `/local/` will serve it as scriptable
-  same-origin content. Two independent fixes, either sufficient: filter
-  the allowlist to recognized image extensions, or serve every `/local/`
-  response as `application/octet-stream` plus `nosniff`.
+  (`crates/mudl-core/src/template.rs`) now only adds a resolved path to the
+  allowlist when `mudl_core::images::classify` recognizes its extension as
+  an image type; the `src` is still rewritten to `/local/...` either way,
+  so a document containing `<img src="notes.html">` renders a broken image
+  instead of putting an `.html` path in the allowlist for `/local/` to
+  serve as scriptable same-origin content. Covered by
+  `unrecognized_extension_is_rewritten_but_not_allowlisted` in
+  `template.rs`.
 - **`html_escape` doesn't escape `'` — open.**
   (`crates/mudl-core/src/encoding.rs`; `encoding.rs:72` still asserts `'`
   passes through). Safe today only because every attribute this codebase

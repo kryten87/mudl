@@ -290,6 +290,15 @@ pub fn rewrite_local_image_srcs(html: &str, base_dir: &Path) -> String {
 /// local file read described in `docs/SECURITY.md` Finding 2 (previously
 /// `serve_local_file` would read and return *any* path a request named,
 /// with no relation to the document being viewed).
+///
+/// A path is only added to the allowlist when [`crate::images::classify`]
+/// recognizes its extension as an image type. Without this check, a
+/// document with `<img src="notes.html">` would put an arbitrary `.html`
+/// path in the allowlist, which `/local/` then serves as scriptable
+/// same-origin content (`docs/SECURITY.md` Finding 8, "`/local/` serves
+/// `.html` as `text/html`") — the `src` is still rewritten to `/local/...`
+/// either way, so an unrecognized extension just renders as a broken image,
+/// same as a path that doesn't exist.
 pub fn rewrite_local_image_srcs_with_paths(html: &str, base_dir: &Path) -> (String, Vec<PathBuf>) {
     let paths = RefCell::new(Vec::new());
     let rewritten = rewrite_img_srcs(html, &|src| {
@@ -298,7 +307,9 @@ pub fn rewrite_local_image_srcs_with_paths(html: &str, base_dir: &Path) -> (Stri
         }
         let resolved = base_dir.join(src);
         let rewritten_src = format!("/local/{}", percent_encode(&resolved.to_string_lossy()));
-        paths.borrow_mut().push(resolved);
+        if crate::images::classify(src, base_dir).is_some() {
+            paths.borrow_mut().push(resolved);
+        }
         rewritten_src
     });
     (rewritten, paths.into_inner())
@@ -1032,6 +1043,20 @@ mod rewrite_local_image_srcs_with_paths_tests {
         let html = r#"<img src="https://example.com/photo.png">"#;
         let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base);
         assert_eq!(rewritten, html);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn unrecognized_extension_is_rewritten_but_not_allowlisted() {
+        // `docs/SECURITY.md` Finding 8: `<img src="notes.html">` must not
+        // put an `.html` path in the allowlist `/local/` trusts, even
+        // though the `src` is still rewritten the same as any other local
+        // path (so it renders as a broken image rather than being
+        // silently dropped).
+        let base = Path::new("/base/dir");
+        let html = r#"<img src="notes.html">"#;
+        let (rewritten, paths) = rewrite_local_image_srcs_with_paths(html, base);
+        assert_eq!(rewritten, "<img src=\"/local//base/dir/notes.html\">");
         assert!(paths.is_empty());
     }
 }
