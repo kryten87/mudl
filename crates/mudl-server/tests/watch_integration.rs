@@ -43,7 +43,9 @@ fn start_server() -> (SocketAddr, VersionCounter) {
 /// `tests/http_server.rs`'s `get` helper.
 fn get(addr: SocketAddr, path: &str) -> Vec<u8> {
     let mut stream = connect_with_retry(addr);
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // `Host` has to name exactly the address the server bound to
+    // (`docs/SECURITY.md` Finding 2's `Host`-check hardening step).
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .expect("failed to write request");

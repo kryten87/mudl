@@ -56,7 +56,10 @@ fn get(addr: SocketAddr, path: &str) -> Vec<u8> {
     // yet the instant it's spawned; retry the connect briefly rather than
     // introducing a flaky fixed sleep.
     let mut stream = connect_with_retry(addr);
-    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // `Host` has to name exactly the address the server bound to
+    // (`docs/SECURITY.md` Finding 2's `Host`-check hardening step) — a real
+    // WebView navigating to `http://127.0.0.1:<port>/` sends exactly this.
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .expect("failed to write request");
@@ -229,6 +232,26 @@ fn local_file_route_with_wrong_token_is_404_even_when_path_is_allowed() {
     let (head, _body) = split_head_and_body(&response);
 
     assert!(head.starts_with("HTTP/1.1 404 Not Found"));
+}
+
+#[test]
+fn request_with_host_header_naming_a_different_address_is_403() {
+    // Regression test for `docs/SECURITY.md` Finding 2's DNS-rebinding
+    // vector: a remote page can point a hostname it controls at
+    // 127.0.0.1 and have the browser send that hostname as `Host` while
+    // still connecting to this loopback port.
+    let (addr, _version) = start_server();
+    let mut stream = connect_with_retry(addr);
+    stream
+        .write_all(b"GET /assets/mud.css HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+        .expect("failed to write request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("failed to read response");
+    let (head, _body) = split_head_and_body(&response);
+
+    assert!(head.starts_with("HTTP/1.1 403 Forbidden"));
 }
 
 #[test]

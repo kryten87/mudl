@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -114,6 +114,13 @@ const MAX_REQUEST_LINE_LEN: u64 = 8 * 1024;
 /// ever hold open at once.
 const MAX_CONCURRENT_CONNECTIONS: usize = 256;
 
+/// Upper bound on the total bytes of header lines read after the request
+/// line. Mirrors `MAX_REQUEST_LINE_LEN`'s rationale: reading headers at all
+/// is new (needed for the `Host` check below), so a client that sends
+/// headers without ever terminating them with a blank line needs the same
+/// kind of cap the request line already has.
+const MAX_HEADER_BYTES: u64 = 16 * 1024;
+
 /// Generates a per-instance random token for `DocumentSource::local_token`.
 /// Built from two independently-created `RandomState` hashers rather than a
 /// `rand` dependency: each `RandomState::new()` draws fresh keys from the
@@ -183,25 +190,43 @@ pub fn serve(
     }
 }
 
-/// Reads one HTTP request line from `stream`, dispatches it, and writes
-/// back the response. Errors reading or writing (a client disconnecting
-/// mid-request, say) are swallowed here — there's no one left to report
-/// them to once the connection is already broken.
+/// Reads one HTTP request line and its headers from `stream`, dispatches
+/// the request, and writes back the response. Errors reading or writing (a
+/// client disconnecting mid-request, say) are swallowed here — there's no
+/// one left to report them to once the connection is already broken.
 ///
-/// The read is capped at `MAX_REQUEST_LINE_LEN` bytes via `Read::take`: a
-/// client that sends that many bytes without a newline gets a 400 rather
-/// than an unbounded buffer.
+/// The request-line read is capped at `MAX_REQUEST_LINE_LEN` bytes via
+/// `Read::take`: a client that sends that many bytes without a newline gets
+/// a 400 rather than an unbounded buffer. The header read is capped the
+/// same way, at `MAX_HEADER_BYTES`.
 fn handle_connection(
     mut stream: TcpStream,
     version: &VersionCounter,
     filesystem: &Arc<dyn FileSystem>,
     document: &DocumentSource,
 ) {
-    let mut reader = BufReader::new(&stream).take(MAX_REQUEST_LINE_LEN);
+    let local_addr = stream.local_addr().ok();
+    let mut reader = BufReader::new(&stream);
     let mut line = String::new();
-    let response = match reader.read_line(&mut line) {
+    let read_result = reader
+        .by_ref()
+        .take(MAX_REQUEST_LINE_LEN)
+        .read_line(&mut line);
+    let response = match read_result {
         Ok(_) if line.ends_with('\n') => match http::parse_request_line(&line) {
-            Some(req) => respond_to(&req, version, filesystem.as_ref(), document),
+            Some(req) => match read_headers(&mut reader) {
+                Ok(headers) => {
+                    if host_header_matches(&headers, local_addr) {
+                        respond_to(&req, version, filesystem.as_ref(), document)
+                    } else {
+                        forbidden()
+                    }
+                }
+                // A connection that closes, or that never terminates its
+                // headers with a blank line before the cap — malformed
+                // either way.
+                Err(()) => bad_request(),
+            },
             None => bad_request(),
         },
         // Either an I/O error, or the line never ended in a newline within
@@ -212,6 +237,56 @@ fn handle_connection(
 
     let _ = stream.write_all(&response);
     let _ = stream.flush();
+}
+
+/// Reads header lines from `reader` until a blank line terminates them (per
+/// HTTP's header-block syntax), returning the raw `Name: value` lines seen
+/// with no further parsing. `Err(())` covers the connection closing or
+/// `MAX_HEADER_BYTES` being exceeded before that blank line arrives.
+fn read_headers(reader: &mut BufReader<&TcpStream>) -> Result<Vec<String>, ()> {
+    let mut headers = Vec::new();
+    let mut remaining = MAX_HEADER_BYTES;
+    loop {
+        let mut line = String::new();
+        let read = reader
+            .by_ref()
+            .take(remaining)
+            .read_line(&mut line)
+            .map_err(|_| ())?;
+        if read == 0 || !line.ends_with('\n') {
+            return Err(());
+        }
+        remaining = remaining.saturating_sub(read as u64);
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            return Ok(headers);
+        }
+        headers.push(trimmed.to_string());
+    }
+}
+
+/// Looks up a header by name (case-insensitively, per RFC 7230 §3.2) among
+/// raw `Name: value` lines. Returns the first match, trimmed.
+fn header_value<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// Whether the request's `Host` header names exactly the address this
+/// connection was accepted on (`127.0.0.1:<port>`). Closes the
+/// DNS-rebinding half of `docs/SECURITY.md` Finding 2's remaining hardening
+/// step: without this check, a remote page can point a hostname it
+/// controls at `127.0.0.1` and have the browser send that hostname as
+/// `Host` while still connecting to this loopback port, so the response is
+/// treated as same-origin with the attacker's page. A missing `Host`
+/// header, or one naming anything else, is rejected.
+fn host_header_matches(headers: &[String], local_addr: Option<SocketAddr>) -> bool {
+    match (header_value(headers, "Host"), local_addr) {
+        (Some(host), Some(addr)) => host == addr.to_string(),
+        _ => false,
+    }
 }
 
 /// The pure decision logic for turning a parsed request into response
@@ -342,6 +417,10 @@ fn not_found() -> Vec<u8> {
 
 fn bad_request() -> Vec<u8> {
     http::format_response(400, &[("Content-Type", "text/plain")], b"Bad Request")
+}
+
+fn forbidden() -> Vec<u8> {
+    http::format_response(403, &[("Content-Type", "text/plain")], b"Forbidden")
 }
 
 #[cfg(test)]
@@ -661,10 +740,11 @@ mod handle_connection_tests {
 
     /// Runs `handle_connection` against a real loopback socket: spawns an
     /// acceptor thread that reads one connection and hands it to
-    /// `handle_connection`, connects a client, writes `request_bytes`, and
-    /// returns whatever came back before the acceptor thread closes the
-    /// socket.
-    fn run_request(request_bytes: &[u8]) -> Vec<u8> {
+    /// `handle_connection`, connects a client, writes whatever
+    /// `build_request` returns (given the address the server actually bound
+    /// to, so a test can put a correct `Host` header in it), and returns
+    /// whatever came back before the acceptor thread closes the socket.
+    fn run_request(build_request: impl FnOnce(SocketAddr) -> Vec<u8>) -> Vec<u8> {
         let listener = bind().unwrap();
         let addr = listener.local_addr().unwrap();
         let version = VersionCounter::new();
@@ -678,7 +758,7 @@ mod handle_connection_tests {
 
         let mut client = TcpStream::connect(addr).unwrap();
         let mut writer = client.try_clone().unwrap();
-        let request_bytes = request_bytes.to_vec();
+        let request_bytes = build_request(addr);
         // Writes on their own thread: once the server has read enough to
         // decide the request is malformed (the oversized-request-line
         // case), it responds and closes its side without draining the
@@ -696,9 +776,16 @@ mod handle_connection_tests {
         response
     }
 
+    /// A well-formed `GET <path>` request carrying a `Host` header that
+    /// matches wherever `run_request` actually bound its test server —
+    /// what a real WebView's request looks like.
+    fn get_with_correct_host(path: &str) -> Vec<u8> {
+        run_request(|addr| format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n").into_bytes())
+    }
+
     #[test]
     fn ordinary_request_line_is_served_normally() {
-        let response = run_request(b"GET /assets/mud.css HTTP/1.1\r\n\r\n");
+        let response = get_with_correct_host("/assets/mud.css");
         let text = String::from_utf8_lossy(&response);
         assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
     }
@@ -709,10 +796,44 @@ mod handle_connection_tests {
         // sending anything past the cap would leave unread bytes in the
         // socket when the server closes it, which triggers a spurious
         // `ConnectionReset` on this end rather than exercising the cap.
-        let request = vec![b'a'; MAX_REQUEST_LINE_LEN as usize];
-
-        let response = run_request(&request);
+        let response = run_request(|_addr| vec![b'a'; MAX_REQUEST_LINE_LEN as usize]);
         let text = String::from_utf8_lossy(&response);
         assert!(text.starts_with("HTTP/1.1 400 Bad Request"), "{text}");
+    }
+
+    #[test]
+    fn headers_over_the_cap_with_no_terminating_blank_line_is_a_400() {
+        // Same shape as the request-line cap, for the header read added to
+        // support the `Host` check: a header block that never reaches its
+        // terminating blank line within `MAX_HEADER_BYTES` is malformed,
+        // not something to keep reading forever.
+        let response = run_request(|_addr| {
+            let mut request = b"GET / HTTP/1.1\r\n".to_vec();
+            request.extend(vec![b'a'; MAX_HEADER_BYTES as usize]);
+            request
+        });
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 400 Bad Request"), "{text}");
+    }
+
+    #[test]
+    fn missing_host_header_is_403() {
+        let response = run_request(|_addr| b"GET /assets/mud.css HTTP/1.1\r\n\r\n".to_vec());
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 403 Forbidden"), "{text}");
+    }
+
+    #[test]
+    fn host_header_naming_a_different_address_is_403() {
+        // Regression test for `docs/SECURITY.md` Finding 2's DNS-rebinding
+        // vector: a remote page can point a hostname it controls at
+        // 127.0.0.1 and have the browser send that hostname as `Host` while
+        // still connecting to this loopback port. Rejecting any `Host` that
+        // doesn't name the bound address closes it.
+        let response = run_request(|_addr| {
+            b"GET /assets/mud.css HTTP/1.1\r\nHost: evil.example\r\n\r\n".to_vec()
+        });
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 403 Forbidden"), "{text}");
     }
 }

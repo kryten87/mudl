@@ -16,7 +16,7 @@ Current status:
 
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
-| 2 | Arbitrary local file read over the HTTP server | critical | **Fixed**; one hardening step still open |
+| 2 | Arbitrary local file read over the HTTP server | critical | **Fixed**; both hardening steps done |
 | 3 | Script execution from document content | critical | **Fixed** |
 | 4 | Remote images load unconditionally | low | **Fixed** |
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
@@ -90,13 +90,15 @@ for a `/local/` path cold; the only way to learn a valid token is to have
 already loaded `/` and read it out of that render's own `<img src>`
 values.
 
-**Still open:** `handle_connection` (`crates/mudl-server/src/server.rs`)
-still reads only the request line, so no `Host` header is checked. Still
-worth doing to close the DNS-rebinding vector against the other routes —
-though with the allowlist and the token both in place, what it now reaches
-for `/local/` is nothing without the token, and for the other routes is
-the document's own rendered output and bundled assets rather than
-arbitrary files.
+**Update:** the second hardening step is done too. `handle_connection`
+(`crates/mudl-server/src/server.rs`) now reads the request's headers (a new
+`read_headers`, capped at `MAX_HEADER_BYTES` the same way the request line
+is capped) and rejects the request with a 403 unless its `Host` header
+names exactly the address the connection was accepted on
+(`host_header_matches`) — closing the DNS-rebinding path where a remote
+page points a hostname it controls at `127.0.0.1` and has the browser
+treat the response as same-origin with that page regardless of what `Host`
+value it sent.
 
 The description below is preserved as the original record of what was
 found.
