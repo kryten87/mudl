@@ -277,21 +277,42 @@
     return !!match && /https?:/.test(match[1]);
   }
 
-  // Capture phase: `error` doesn't bubble, so a listener on `document` only
-  // sees it at all if attached for the capture phase.
-  document.addEventListener("error", function (event) {
-    var img = event.target;
-    if (!img || img.tagName !== "IMG" || img.dataset.mudBlockedShown) return;
-    if (!isRemoteImage(img)) return;
+  function showBlockedImagePlaceholder(img, allowed) {
+    if (img.dataset.mudBlockedShown) return;
     img.dataset.mudBlockedShown = "1";
 
     var label = img.getAttribute("alt") || img.src;
     var note = document.createElement("span");
     note.className = "mud-blocked-image";
-    note.textContent = remoteImagesCurrentlyAllowed()
+    note.textContent = allowed
       ? "Image failed to load: " + label
       : "External image hidden (" + label + ") — enable via View > Show External Images";
     img.replaceWith(note);
+  }
+
+  // Every remote image already in the DOM by the time this (un-deferred,
+  // end-of-body) script runs is swapped immediately when the page's own CSP
+  // rules it out — rather than waiting for the browser's `error` event, which
+  // an image the reader already loaded once (an earlier "Show External
+  // Images" reload of this same URL) may not fire again on a later reload:
+  // it can be served straight out of WebKit's own cache with no fresh
+  // network request or `error` event at all, which is what let the plain
+  // alt-text fallback slip back in after a toggle-on/toggle-off cycle.
+  if (!remoteImagesCurrentlyAllowed()) {
+    Array.prototype.forEach.call(document.images, function (img) {
+      if (isRemoteImage(img)) showBlockedImagePlaceholder(img, false);
+    });
+  }
+
+  // Catches everything the proactive scan above can't: an allowed remote
+  // image that genuinely fails (dead link, offline), and any image a later
+  // script inserts into the page. Capture phase, since `error` doesn't
+  // bubble.
+  document.addEventListener("error", function (event) {
+    var img = event.target;
+    if (!img || img.tagName !== "IMG") return;
+    if (!isRemoteImage(img)) return;
+    showBlockedImagePlaceholder(img, remoteImagesCurrentlyAllowed());
   }, true);
 
   // -- Theme ----------------------------------------------------------------
