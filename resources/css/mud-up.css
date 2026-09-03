@@ -603,6 +603,28 @@ img {
   height: auto;
 }
 
+/* Stands in for a blocked/failed remote image (`resources/js/mud.js`'s
+   `error`-event handler) — a dashed box makes it obvious something was
+   hidden, unlike the bare alt text a browser falls back to on its own. */
+.mud-blocked-image {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  max-width: min(800px, 100%);
+  padding: 0.5em 0.75em;
+  border: 1px dashed var(--border-color);
+  border-radius: 3px;
+  background-color: var(--code-bg);
+  color: var(--blockquote-color);
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+.mud-blocked-image::before {
+  content: "\1F5BC";
+  font-style: normal;
+}
+
 /* -- Frontmatter ---------------------------------------------------------- */
 
 .mud-frontmatter {

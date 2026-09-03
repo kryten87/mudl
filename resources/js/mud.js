@@ -243,6 +243,57 @@
     }
   }
 
+  // -- Blocked remote images --------------------------------------------------
+
+  // A remote http(s) image that fails to load usually means `img-src` left
+  // it out (`docs/SECURITY.md` Finding 4 — remote images are off by default
+  // so a document can't beacon the reader's IP and open-time to whoever
+  // wrote it), not a dead link. The browser's own fallback for a failed
+  // image is just the bare alt text with no visible box, which gives no
+  // hint that anything was hidden — so a failed *remote* image (same-origin
+  // `/local/...`/`/assets/...` failures are left to the browser's ordinary
+  // broken-image rendering, since those aren't this feature's doing) is
+  // swapped for a placeholder that says so and names the menu item that
+  // turns it back on.
+
+  function isRemoteImage(img) {
+    if (!/^https?:\/\//i.test(img.src)) return false;
+    try {
+      return new URL(img.src).origin !== window.location.origin;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Reads the answer back out of the page's own CSP `<meta>` tag rather than
+  // threading a separate flag through the template — that tag is already
+  // the single source of truth for whether this page's `img-src` admits
+  // `https:`/`http:` (`crates/mudl-server/src/document.rs`'s `csp_img_src`).
+  function remoteImagesCurrentlyAllowed() {
+    var meta = document.querySelector(
+      'meta[http-equiv="Content-Security-Policy"]'
+    );
+    var match = meta && /img-src([^;]*)/.exec(meta.content);
+    return !!match && /https?:/.test(match[1]);
+  }
+
+  // Capture phase: `error` doesn't bubble, so a listener on `document` only
+  // sees it at all if attached for the capture phase.
+  document.addEventListener("error", function (event) {
+    var img = event.target;
+    if (!img || img.tagName !== "IMG" || img.dataset.mudBlockedShown) return;
+    if (!isRemoteImage(img)) return;
+    img.dataset.mudBlockedShown = "1";
+
+    var label = img.getAttribute("alt") || img.src;
+    var note = document.createElement("span");
+    note.className = "mud-blocked-image";
+    note.textContent = remoteImagesCurrentlyAllowed()
+      ? "Image failed to load: " + label
+      : "External image hidden (" + label + ") — enable via View > Show External Images";
+    img.replaceWith(note);
+  }, true);
+
   // -- Theme ----------------------------------------------------------------
 
   function setTheme(cssString) {
