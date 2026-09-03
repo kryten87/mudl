@@ -70,6 +70,39 @@ pub const MERMAID_INIT_JS: &str = include_str!("../../../resources/js/mermaid-in
 /// page's `script-src` CSP no longer allows `'unsafe-inline'`).
 pub const LIVE_RELOAD_JS: &str = include_str!("../../../resources/js/live-reload.js");
 
+/// Looks up an embedded asset's content by its conventional filename (e.g.
+/// `"mud.css"`, `"highlight.min.js"`) — the same names
+/// `crate::template::select_assets` returns in its `AssetSelection` and
+/// `mudl-server`'s `/assets/<name>` route serves. `None` means "not an
+/// embedded asset."
+pub fn lookup(name: &str) -> Option<&'static str> {
+    match name {
+        "mud.css" => Some(MUD_CSS),
+        "mud-up.css" => Some(MUD_UP_CSS),
+        "mud-down.css" => Some(MUD_DOWN_CSS),
+        "mud-narrow.css" => Some(MUD_NARROW_CSS),
+        "mud-print.css" => Some(MUD_PRINT_CSS),
+        "mud-find.css" => Some(MUD_FIND_CSS),
+        "mud-math.css" => Some(MUD_MATH_CSS),
+        "theme-austere.css" => Some(THEME_AUSTERE_CSS),
+        "theme-blues.css" => Some(THEME_BLUES_CSS),
+        "theme-earthy.css" => Some(THEME_EARTHY_CSS),
+        "theme-riot.css" => Some(THEME_RIOT_CSS),
+        "theme-system.css" => Some(THEME_SYSTEM_CSS),
+        "highlight.min.js" => Some(HIGHLIGHT_JS),
+        "mermaid.min.js" => Some(MERMAID_JS),
+        "temml.min.js" => Some(TEMML_JS),
+        "mud.js" => Some(MUD_JS),
+        "mud-up.js" => Some(MUD_UP_JS),
+        "mud-down.js" => Some(MUD_DOWN_JS),
+        "highlight-init.js" => Some(HIGHLIGHT_INIT_JS),
+        "math-init.js" => Some(MATH_INIT_JS),
+        "mermaid-init.js" => Some(MERMAID_INIT_JS),
+        "live-reload.js" => Some(LIVE_RELOAD_JS),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +171,19 @@ mod tests {
         assert!(MUD_UP_CSS.contains("Up Mode"));
         assert!(MUD_DOWN_CSS.contains("Down Mode"));
         assert!(MUD_FIND_CSS.contains("Find highlights"));
+    }
+
+    #[test]
+    fn lookup_finds_known_css_and_js_assets() {
+        assert_eq!(lookup("mud.css"), Some(MUD_CSS));
+        assert_eq!(lookup("theme-earthy.css"), Some(THEME_EARTHY_CSS));
+        assert_eq!(lookup("highlight.min.js"), Some(HIGHLIGHT_JS));
+        assert_eq!(lookup("live-reload.js"), Some(LIVE_RELOAD_JS));
+    }
+
+    #[test]
+    fn lookup_of_unknown_name_is_none() {
+        assert_eq!(lookup("does-not-exist.css"), None);
+        assert_eq!(lookup(""), None);
     }
 }

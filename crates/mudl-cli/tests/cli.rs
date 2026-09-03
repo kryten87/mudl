@@ -95,6 +95,18 @@ fn multiple_files_are_each_rendered() {
 }
 
 #[test]
+fn default_output_titles_the_document_with_the_filename() {
+    let path = write_temp_md("titled.md", "# Hello\n");
+    let output = Command::new(bin()).arg("-u").arg(&path).output().unwrap();
+    std::fs::remove_file(&path).ok();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    assert!(stdout.contains(&format!("<title>{filename}</title>")));
+}
+
+#[test]
 fn standalone_inlines_local_image_as_data_uri() {
     let mut img_path = std::env::temp_dir();
     img_path.push(format!("mudl-cli-test-{}-pixel.png", std::process::id()));

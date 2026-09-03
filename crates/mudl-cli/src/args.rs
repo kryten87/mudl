@@ -20,6 +20,11 @@ pub struct RenderArgs {
     pub mode: Mode,
     pub files: Vec<String>,
     pub standalone: bool,
+    /// `true` emits only the rendered body, with no `<html>`/`<head>`
+    /// wrapper, CSS, or scripts — for embedding in a page the caller
+    /// already supplies. `false` (the default) produces a complete,
+    /// self-contained HTML document, matching upstream `mud`'s `--fragment`
+    /// semantics (Appendix C of `docs/IMPLEMENTATION-PLAN.md`).
     pub fragment: bool,
     pub line_numbers: bool,
     pub word_wrap: bool,
@@ -257,6 +262,15 @@ mod tests {
     }
 
     #[test]
+    fn fragment_defaults_to_false() {
+        let parsed = parse(&args(&["-u", "a.md"])).unwrap();
+        match parsed {
+            ParsedArgs::Render(r) => assert!(!r.fragment),
+            other => panic!("expected Render, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn line_numbers_word_wrap_readable_column_flags() {
         let parsed = parse(&args(&[
             "-u",
@@ -327,26 +341,6 @@ mod tests {
                 r.files,
                 vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()]
             ),
-            other => panic!("expected Render, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn fragment_combined_with_noop_flags_still_parses() {
-        let parsed = parse(&args(&[
-            "-u",
-            "--fragment",
-            "--line-numbers",
-            "--word-wrap",
-            "a.md",
-        ]))
-        .unwrap();
-        match parsed {
-            ParsedArgs::Render(r) => {
-                assert!(r.fragment);
-                assert!(r.line_numbers);
-                assert!(r.word_wrap);
-            }
             other => panic!("expected Render, got {other:?}"),
         }
     }

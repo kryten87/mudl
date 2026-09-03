@@ -22,7 +22,7 @@ Current status:
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
 | 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal) |
 | 7 | Atomic writes drop permissions and follow symlinks | low-medium | **Fixed** |
-| 8 | Smaller items | — | Three fixed, one open, one partly fixed |
+| 8 | Smaller items | — | Four fixed, one open |
 
 
 ## 1. Threat model
@@ -414,16 +414,26 @@ through symlinks before deciding where the temp file goes.
   (`crates/mudl-core/src/encoding.rs`). `'` now maps to `&#39;`, the same
   as the other three specials; `all_five_specials` in `encoding.rs`
   covers it.
-- **CLI output is an unsanitized fragment — mostly fixed.** Finding 3's
-  sanitizing lives in `render.rs`, which `render_one`
-  (`crates/mudl-cli/src/main.rs:189`) goes through, so the stored-XSS half
-  of this item is closed: `<script>`, `on*` handlers, and `javascript:`
-  hrefs no longer survive `mudl -u`. What remains is not a vulnerability
-  but a documented shape — `render_one` still emits no document wrapper,
-  so its output carries no CSP and must be embedded in a page that
-  supplies one. Still open and still not a security issue:
-  `--fragment`/`-f` is parsed in `crates/mudl-cli/src/args.rs` but never
-  read by `render_one`, so it remains a no-op.
+- **CLI output is an unsanitized fragment — fixed.** Finding 3's sanitizing
+  lives in `render.rs`, which `render_one` (`crates/mudl-cli/src/main.rs`)
+  goes through, so the stored-XSS half of this item was already closed:
+  `<script>`, `on*` handlers, and `javascript:` hrefs don't survive
+  `mudl -u`. The remaining gap was that `render_one` never emitted a
+  document wrapper at all — its output had no CSP and had to be embedded in
+  a page that supplied one — while `--fragment`/`-f` was parsed but never
+  read, so there was no way to *get* a wrapper. `render_one` now wraps its
+  output in a complete document by default (`wrap_full_document`): embedded
+  CSS/JS (no `/assets/` route to reference, so scripts are inlined —
+  content this codebase controls, never document-derived, per Finding 3's
+  own rule), a `Content-Security-Policy` meta tag (`img-src 'self' data:`,
+  matching Finding 4's default), and local images always inlined as data
+  URIs (there's no server to resolve a relative `<img src>` against).
+  `--fragment` now actually does what it always claimed: bare body, no
+  wrapper, matching upstream `mud`'s semantics (Appendix C of
+  `docs/IMPLEMENTATION-PLAN.md`). Covered by
+  `default_output_is_a_complete_html_document`,
+  `fragment_flag_emits_bare_body_with_no_wrapper`, and related tests in
+  `main.rs` and `tests/cli.rs`.
 - **Vendored JavaScript is pinned with no update path — open.**
   `resources/js/` carries highlight.js 11.9.0 (2023), Temml 0.13.3, and
   Mermaid 11.12.3 — the same three versions as at `ebab3e7`. Both
