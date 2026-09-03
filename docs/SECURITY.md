@@ -22,7 +22,7 @@ Current status:
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
 | 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal) |
 | 7 | Atomic writes drop permissions and follow symlinks | low-medium | **Fixed** |
-| 8 | Smaller items | — | Four fixed, one open |
+| 8 | Smaller items | — | All fixed |
 
 
 ## 1. Threat model
@@ -434,14 +434,22 @@ through symlinks before deciding where the temp file goes.
   `default_output_is_a_complete_html_document`,
   `fragment_flag_emits_bare_body_with_no_wrapper`, and related tests in
   `main.rs` and `tests/cli.rs`.
-- **Vendored JavaScript is pinned with no update path — open.**
-  `resources/js/` carries highlight.js 11.9.0 (2023), Temml 0.13.3, and
-  Mermaid 11.12.3 — the same three versions as at `ebab3e7`. Both
-  configurable renderers are configured correctly —
-  Mermaid runs at its default `securityLevel: 'strict'` (DOMPurify
-  sanitized) and Temml's `trust` defaults to false, so neither `\href`
-  nor raw HTML labels are live. The concern is staleness: nothing in the
-  build notices when one of these picks up a published advisory.
+- **Vendored JavaScript is pinned with no update path — fixed.**
+  `resources/js/` still carries highlight.js 11.9.0 (2023), Temml 0.13.3,
+  and Mermaid 11.12.3 — the same three versions as at `ebab3e7` — and both
+  configurable renderers remain configured correctly: Mermaid runs at its
+  default `securityLevel: 'strict'` (DOMPurify sanitized) and Temml's
+  `trust` defaults to false, so neither `\href` nor raw HTML labels are
+  live. What was missing was staleness *detection*: nothing in the build
+  noticed when one of these picked up a published advisory.
+  `.github/workflows/vendored-js-versions.yml` now runs weekly (and on
+  manual dispatch), extracting the version each vendored file's own
+  banner/metadata claims and diffing it against npm's `latest` dist-tag for
+  the same package — confirmed against the real registry, all three are
+  currently behind (highlight.js 11.12.0, Mermaid 11.17.2, Temml 0.13.5
+  are current as of this fix). It's a separate workflow from `ci.yml`
+  rather than a step in it: a new upstream release isn't a signal that this
+  repo's own change is broken, so it shouldn't gate merges.
 
 
 ## 9. What was checked and found clean
