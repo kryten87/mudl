@@ -22,7 +22,7 @@ Current status:
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
 | 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal) |
 | 7 | Atomic writes drop permissions and follow symlinks | low-medium | **Fixed** |
-| 8 | Smaller items | — | Three open, one partly fixed, one reduced |
+| 8 | Smaller items | — | One fixed, two open, one partly fixed, one reduced |
 
 
 ## 1. Threat model
@@ -390,13 +390,16 @@ through symlinks before deciding where the temp file goes.
 
 ## 8. Smaller items
 
-- **Unbounded request line — open.** (`handle_connection`,
-  `crates/mudl-server/src/server.rs:135`). `BufReader::read_line` has no
-  size cap, so a local client that sends bytes without a newline grows the
-  buffer until the process is out of memory. Thread-per-connection is
-  likewise uncapped — the accept loop (`server.rs:108`) spawns without
-  limit. Both are local-only denial of service, and both are cheap to
-  bound. Unchanged as of `e88708e`.
+- **Unbounded request line — fixed.** (`handle_connection`,
+  `crates/mudl-server/src/server.rs`). The request-line read now goes
+  through `Read::take(MAX_REQUEST_LINE_LEN)` (8 KiB) before `read_line`, so
+  a local client that sends bytes without a newline gets a 400 once the
+  cap is hit rather than growing the buffer without limit. The accept loop
+  (`serve`) now tracks in-flight connections with an `AtomicUsize` and
+  drops (without spawning a thread for) any connection past
+  `MAX_CONCURRENT_CONNECTIONS` (256), closing the socket immediately
+  instead. Both were local-only denial of service; both are covered by new
+  tests in `server.rs`'s `handle_connection_tests`.
 - **`/local/` serves `.html` as `text/html` — open, reduced.**
   (`crates/mudl-server/src/mime.rs`) on a response that carries no CSP —
   only the document route embeds the `<meta>` policy — and with no

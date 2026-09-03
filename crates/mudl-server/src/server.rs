@@ -8,9 +8,10 @@
 //! traffic (see the plan's rationale in §10, step 4.5).
 
 use std::collections::HashSet;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -81,6 +82,21 @@ impl DocumentSource {
 /// plausible long-poll interval in practice.
 const WAIT_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Upper bound on the size of a single HTTP request line. No real request
+/// from `mudl-gui`'s WebView or `mudl-cli` needs anywhere near this many
+/// bytes; it exists only to stop a local client that never sends a newline
+/// from growing `handle_connection`'s buffer without limit
+/// (`docs/SECURITY.md` Finding 8, "Unbounded request line").
+const MAX_REQUEST_LINE_LEN: u64 = 8 * 1024;
+
+/// Upper bound on simultaneously in-flight connections. `serve`'s
+/// thread-per-connection accept loop otherwise spawns without limit, so a
+/// local client that opens connections and never closes them could exhaust
+/// threads/memory (`docs/SECURITY.md` Finding 8, "Unbounded request line").
+/// Comfortably above anything a single WebView tab plus long-polls would
+/// ever hold open at once.
+const MAX_CONCURRENT_CONNECTIONS: usize = 256;
+
 /// Binds a `TcpListener` on `127.0.0.1`, letting the OS pick a free port.
 /// Call `.local_addr()` on the result to find out which port was chosen.
 pub fn bind() -> io::Result<TcpListener> {
@@ -105,13 +121,25 @@ pub fn serve(
     filesystem: Arc<dyn FileSystem>,
     document: Arc<DocumentSource>,
 ) {
+    let in_flight = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                if in_flight.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_CONNECTIONS {
+                    // Over the cap: drop the connection without spawning a
+                    // thread for it. Closing `stream` here sends the client
+                    // a reset rather than leaving it hanging.
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    continue;
+                }
                 let version = version.clone();
                 let filesystem = Arc::clone(&filesystem);
                 let document = Arc::clone(&document);
-                thread::spawn(move || handle_connection(stream, &version, &filesystem, &document));
+                let in_flight = Arc::clone(&in_flight);
+                thread::spawn(move || {
+                    handle_connection(stream, &version, &filesystem, &document);
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                });
             }
             // A single failed accept (e.g. a connection reset before we
             // could accept it) shouldn't take down the whole server.
@@ -124,21 +152,27 @@ pub fn serve(
 /// back the response. Errors reading or writing (a client disconnecting
 /// mid-request, say) are swallowed here — there's no one left to report
 /// them to once the connection is already broken.
+///
+/// The read is capped at `MAX_REQUEST_LINE_LEN` bytes via `Read::take`: a
+/// client that sends that many bytes without a newline gets a 400 rather
+/// than an unbounded buffer.
 fn handle_connection(
     mut stream: TcpStream,
     version: &VersionCounter,
     filesystem: &Arc<dyn FileSystem>,
     document: &DocumentSource,
 ) {
-    let mut reader = BufReader::new(&stream);
+    let mut reader = BufReader::new(&stream).take(MAX_REQUEST_LINE_LEN);
     let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return;
-    }
-
-    let response = match http::parse_request_line(&line) {
-        Some(req) => respond_to(&req, version, filesystem.as_ref(), document),
-        None => bad_request(),
+    let response = match reader.read_line(&mut line) {
+        Ok(_) if line.ends_with('\n') => match http::parse_request_line(&line) {
+            Some(req) => respond_to(&req, version, filesystem.as_ref(), document),
+            None => bad_request(),
+        },
+        // Either an I/O error, or the line never ended in a newline within
+        // the cap — treat both as a malformed request rather than reading
+        // further.
+        _ => bad_request(),
     };
 
     let _ = stream.write_all(&response);
@@ -545,5 +579,68 @@ mod respond_to_tests {
         );
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert_eq!(body_of(&response), r#"{"version":0}"#);
+    }
+}
+
+#[cfg(test)]
+mod handle_connection_tests {
+    use super::*;
+    use crate::fs::InMemoryFileSystem;
+
+    /// Runs `handle_connection` against a real loopback socket: spawns an
+    /// acceptor thread that reads one connection and hands it to
+    /// `handle_connection`, connects a client, writes `request_bytes`, and
+    /// returns whatever came back before the acceptor thread closes the
+    /// socket.
+    fn run_request(request_bytes: &[u8]) -> Vec<u8> {
+        let listener = bind().unwrap();
+        let addr = listener.local_addr().unwrap();
+        let version = VersionCounter::new();
+        let filesystem: Arc<dyn FileSystem> = Arc::new(InMemoryFileSystem::new());
+        let document = Arc::new(DocumentSource::new(PathBuf::from("/docs/notes.md")));
+
+        let acceptor = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, &version, &filesystem, &document);
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let mut writer = client.try_clone().unwrap();
+        let request_bytes = request_bytes.to_vec();
+        // Writes on their own thread: once the server has read enough to
+        // decide the request is malformed (the oversized-request-line
+        // case), it responds and closes its side without draining the
+        // rest of `request_bytes`, which can otherwise turn the write into
+        // a `ConnectionReset` on this end. The read below only needs
+        // whatever the server sends back.
+        let writer_thread = thread::spawn(move || {
+            let _ = writer.write_all(&request_bytes);
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+        });
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        acceptor.join().unwrap();
+        let _ = writer_thread.join();
+        response
+    }
+
+    #[test]
+    fn ordinary_request_line_is_served_normally() {
+        let response = run_request(b"GET /assets/mud.css HTTP/1.1\r\n\r\n");
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+    }
+
+    #[test]
+    fn request_line_over_the_cap_with_no_newline_is_a_400() {
+        // Exactly `MAX_REQUEST_LINE_LEN` bytes, no trailing newline at all —
+        // sending anything past the cap would leave unread bytes in the
+        // socket when the server closes it, which triggers a spurious
+        // `ConnectionReset` on this end rather than exercising the cap.
+        let request = vec![b'a'; MAX_REQUEST_LINE_LEN as usize];
+
+        let response = run_request(&request);
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 400 Bad Request"), "{text}");
     }
 }
