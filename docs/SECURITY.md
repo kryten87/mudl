@@ -16,7 +16,7 @@ Current status:
 
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
-| 2 | Arbitrary local file read over the HTTP server | critical | **Fixed**; two hardening steps still open |
+| 2 | Arbitrary local file read over the HTTP server | critical | **Fixed**; one hardening step still open |
 | 3 | Script execution from document content | critical | **Fixed** |
 | 4 | Remote images load unconditionally | low | **Fixed** |
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
@@ -78,14 +78,25 @@ request for `/local/%2Fetc%2Fpasswd` — or any other path the open document
 didn't itself embed as an image — now gets the same 404 as a path that
 doesn't exist, whether or not the file is actually present and readable.
 
-**Still open:** the two hardening steps from the original write-up. As of
-`e88708e`, `handle_connection` (`crates/mudl-server/src/server.rs`) still
-reads only the request line, so no `Host` header is checked, and the
-`/local/` path carries no per-instance token
-(`crates/mudl-server/src/routes.rs`). Both would still be worth doing to
-close the port-scanning and DNS-rebinding vectors against this and the
-other routes — though with the allowlist in place, what either vector now
-reaches is the document's own images rather than arbitrary files.
+**Update:** the first of the two hardening steps from the original
+write-up is done. `DocumentSource` (`crates/mudl-server/src/server.rs`)
+now mints a random 128-bit token per server instance, `document::render`
+embeds it in every generated URL as `/local/<token>/<encoded-path>`
+(`rewrite_local_image_srcs_with_paths` in `crates/mudl-core/src/template.rs`),
+and `serve_local_file` refuses any request whose token doesn't match
+before even checking the allowlist. A party that merely finds the port —
+a local port scan, or a DNS-rebound page guessing it — can no longer ask
+for a `/local/` path cold; the only way to learn a valid token is to have
+already loaded `/` and read it out of that render's own `<img src>`
+values.
+
+**Still open:** `handle_connection` (`crates/mudl-server/src/server.rs`)
+still reads only the request line, so no `Host` header is checked. Still
+worth doing to close the DNS-rebinding vector against the other routes —
+though with the allowlist and the token both in place, what it now reaches
+for `/local/` is nothing without the token, and for the other routes is
+the document's own rendered output and bundled assets rather than
+arbitrary files.
 
 The description below is preserved as the original record of what was
 found.

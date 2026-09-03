@@ -43,6 +43,15 @@ pub struct DocumentSource {
     /// Finding 2: `/local/<path>` used to read and return any path a
     /// request named, with no relation to the document being viewed.
     allowed_local_paths: Mutex<HashSet<PathBuf>>,
+    /// A random token minted once per `DocumentSource` (one per server
+    /// instance — Phase 10.6's "one server per document/tab") and required
+    /// as part of every `/local/<token>/<path>` request. This is
+    /// `docs/SECURITY.md` Finding 2's first hardening step: without it, a
+    /// party that merely finds the port — a local port scan, or a
+    /// DNS-rebound page guessing it — could request `/local/` paths cold.
+    /// With it, the only way to learn a valid token is to have already
+    /// loaded `/` and read it out of that render's own `<img src>` values.
+    local_token: String,
 }
 
 impl DocumentSource {
@@ -51,7 +60,15 @@ impl DocumentSource {
             path,
             config: Mutex::new(DocumentConfig::default()),
             allowed_local_paths: Mutex::new(HashSet::new()),
+            local_token: random_token(),
         }
+    }
+
+    /// The per-instance token every `/local/` request must present
+    /// (`docs/SECURITY.md` Finding 2). `document::render` embeds it in the
+    /// `/local/<token>/<path>` URLs it generates.
+    pub fn local_token(&self) -> &str {
+        &self.local_token
     }
 
     /// Replaces the current rendering config; the next request (or the
@@ -96,6 +113,24 @@ const MAX_REQUEST_LINE_LEN: u64 = 8 * 1024;
 /// Comfortably above anything a single WebView tab plus long-polls would
 /// ever hold open at once.
 const MAX_CONCURRENT_CONNECTIONS: usize = 256;
+
+/// Generates a per-instance random token for `DocumentSource::local_token`.
+/// Built from two independently-created `RandomState` hashers rather than a
+/// `rand` dependency: each `RandomState::new()` draws fresh keys from the
+/// OS's own randomness source (see the standard library's
+/// `std::collections::hash_map::RandomState`), so hashing a fixed input
+/// under two of them yields 128 unpredictable bits without pulling in an
+/// external crate for the one thing that needs it.
+fn random_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    let mut high = RandomState::new().build_hasher();
+    high.write_u8(0);
+    let mut low = RandomState::new().build_hasher();
+    low.write_u8(0);
+    format!("{:016x}{:016x}", high.finish(), low.finish())
+}
 
 /// Binds a `TcpListener` on `127.0.0.1`, letting the OS pick a free port.
 /// Call `.local_addr()` on the result to find out which port was chosen.
@@ -192,7 +227,7 @@ fn respond_to(
     match routes::dispatch(req) {
         Route::Asset(name) => serve_asset(&name),
         Route::Document(mode) => serve_document(mode, version, filesystem, document),
-        Route::LocalFile(path) => serve_local_file(&path, filesystem, document),
+        Route::LocalFile { token, path } => serve_local_file(&token, &path, filesystem, document),
         Route::WaitForChange(since) => wait_for_change(since, version),
         Route::NotFound => not_found(),
     }
@@ -232,6 +267,7 @@ fn serve_document(
         mode,
         version.current(),
         &config,
+        document.local_token(),
     );
     document.set_allowed_local_paths(allowed_local_paths);
     http::format_response(200, &[("Content-Type", "text/html")], html.as_bytes())
@@ -268,13 +304,20 @@ fn serve_asset(name: &str) -> Vec<u8> {
 /// (§1) that a bare `ENOENT`/`EACCES` distinction from `std::fs` is enough,
 /// with no sandboxed denied-vs-missing distinction to preserve.
 ///
-/// `path` is only read if it's in `document`'s current allowlist — the set
-/// of local paths its last render actually referenced (`docs/SECURITY.md`
-/// Finding 2). Anything else is reported as 404, indistinguishable from a
+/// `token` must match `document`'s own `local_token` (`docs/SECURITY.md`
+/// Finding 2's first hardening step) and `path` must be in `document`'s
+/// current allowlist — the set of local paths its last render actually
+/// referenced. Either failing is reported as 404, indistinguishable from a
 /// path that simply doesn't exist, so a request can't use the response to
-/// probe which files are present versus merely disallowed.
-fn serve_local_file(path: &str, filesystem: &dyn FileSystem, document: &DocumentSource) -> Vec<u8> {
-    if !document.allows_local_path(Path::new(path)) {
+/// probe which files are present versus merely disallowed, or to probe
+/// whether a guessed token is correct.
+fn serve_local_file(
+    token: &str,
+    path: &str,
+    filesystem: &dyn FileSystem,
+    document: &DocumentSource,
+) -> Vec<u8> {
+    if token != document.local_token() || !document.allows_local_path(Path::new(path)) {
         return not_found();
     }
     match filesystem.read(Path::new(path)) {
@@ -323,6 +366,13 @@ mod respond_to_tests {
             path: path.to_string(),
             query: HashMap::new(),
         }
+    }
+
+    /// Builds a `/local/<token>/<encoded_path>` request against `document`'s
+    /// actual `local_token`, matching what a real rendered page's `<img
+    /// src>` would contain.
+    fn local_req(document: &DocumentSource, encoded_path: &str) -> Request {
+        req(&format!("/local/{}/{encoded_path}", document.local_token()))
     }
 
     fn wait_req(since: u64) -> Request {
@@ -482,7 +532,7 @@ mod respond_to_tests {
         render_document_first(&version, &filesystem, &document);
 
         let response = respond_to(
-            &req("/local/%2Fdocs%2Fphoto.png"),
+            &local_req(&document, "%2Fdocs%2Fphoto.png"),
             &version,
             &filesystem,
             &document,
@@ -495,6 +545,27 @@ mod respond_to_tests {
     }
 
     #[test]
+    fn local_file_route_with_wrong_token_is_404_even_when_path_is_allowed() {
+        // Second half of Finding 2's hardening: even a path the document
+        // legitimately references must not be served if the request's
+        // token doesn't match this `DocumentSource`'s own.
+        let version = VersionCounter::new();
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", b"![alt](photo.png)".to_vec());
+        filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
+        let document = document_source();
+        render_document_first(&version, &filesystem, &document);
+
+        let response = respond_to(
+            &req("/local/wrong-token/%2Fdocs%2Fphoto.png"),
+            &version,
+            &filesystem,
+            &document,
+        );
+        assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
+    }
+
+    #[test]
     fn local_file_route_absent_from_filesystem_is_404() {
         let version = VersionCounter::new();
         let filesystem = InMemoryFileSystem::new();
@@ -503,7 +574,7 @@ mod respond_to_tests {
         render_document_first(&version, &filesystem, &document);
 
         let response = respond_to(
-            &req("/local/%2Fdocs%2Fmissing.md"),
+            &local_req(&document, "%2Fdocs%2Fmissing.md"),
             &version,
             &filesystem,
             &document,
@@ -524,7 +595,7 @@ mod respond_to_tests {
         render_document_first(&version, &filesystem, &document);
 
         let response = respond_to(
-            &req("/local/%2Fetc%2Fpasswd"),
+            &local_req(&document, "%2Fetc%2Fpasswd"),
             &version,
             &filesystem,
             &document,
@@ -537,12 +608,13 @@ mod respond_to_tests {
         let version = VersionCounter::new();
         let filesystem = InMemoryFileSystem::new();
         filesystem.insert("/docs/photo.png", b"fake-png-bytes".to_vec());
+        let document = document_source();
 
         let response = respond_to(
-            &req("/local/%2Fdocs%2Fphoto.png"),
+            &local_req(&document, "%2Fdocs%2Fphoto.png"),
             &version,
             &filesystem,
-            &document_source(),
+            &document,
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }

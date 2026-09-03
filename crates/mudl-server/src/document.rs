@@ -80,6 +80,11 @@ impl Default for DocumentConfig {
 /// `Route::LocalFile` can confine itself to exactly the files this render
 /// referenced, rather than serving any path a request names (`docs/SECURITY.md`
 /// Finding 2).
+///
+/// `local_token` is the serving `DocumentSource`'s per-instance random
+/// token (Finding 2's first hardening step); it's embedded in every
+/// generated `/local/<token>/<path>` URL so `serve_local_file` can demand
+/// it back before treating the request as legitimate.
 pub fn render(
     markdown: &str,
     base_dir: &Path,
@@ -87,12 +92,14 @@ pub fn render(
     mode: Mode,
     version: u64,
     config: &DocumentConfig,
+    local_token: &str,
 ) -> (String, Vec<PathBuf>) {
     let body = match mode {
         Mode::Up => render_up(markdown, &config.render_options),
         Mode::Down => render_down(markdown, &config.render_options),
     };
-    let (body, allowed_local_paths) = rewrite_local_image_srcs_with_paths(&body, base_dir);
+    let (body, allowed_local_paths) =
+        rewrite_local_image_srcs_with_paths(&body, base_dir, local_token);
     let body = rewrite_local_link_hrefs(&body, base_dir);
     // `data-mudl-version` carries the live-reload baseline to
     // `live-reload.js` without an inline `<script>` — see the
@@ -204,6 +211,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("class=\"up-mode-output\""));
         assert!(html.contains("<h1"));
@@ -221,6 +229,7 @@ mod tests {
             Mode::Down,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("class=\"down-mode-output\""));
         assert!(html.contains("line one"));
@@ -237,6 +246,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("<title>my-notes.md</title>"));
     }
@@ -250,6 +260,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("Theme: Earthy"));
     }
@@ -263,6 +274,7 @@ mod tests {
             Mode::Up,
             42,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("data-mudl-version=\"42\""));
         assert!(html.contains("/assets/live-reload.js"));
@@ -277,6 +289,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("src=\"/local/"));
     }
@@ -290,6 +303,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert_eq!(allowed_local_paths, vec![Path::new("/docs/photo.png")]);
     }
@@ -303,6 +317,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(allowed_local_paths.is_empty());
     }
@@ -316,6 +331,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("href=\"/local-md/"));
     }
@@ -329,6 +345,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("href=\"/local-file/"));
     }
@@ -342,6 +359,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("href=\"#section\""));
     }
@@ -355,6 +373,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("/assets/highlight.min.js"));
         assert!(html.contains("/assets/highlight-init.js"));
@@ -367,8 +386,8 @@ mod tests {
             down_zoom: 0.8,
             ..DocumentConfig::default()
         };
-        let (up_html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config);
-        let (down_html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
+        let (up_html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config, "tok");
+        let (down_html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config, "tok");
         assert!(up_html.contains("style=\"zoom: 1.5\""));
         assert!(down_html.contains("style=\"zoom: 0.8\""));
     }
@@ -392,6 +411,7 @@ mod tests {
             Mode::Down,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         let classes = html_root_class_attr(&html);
         assert_eq!(classes, "has-line-numbers has-word-wrap");
@@ -406,6 +426,7 @@ mod tests {
             Mode::Up,
             0,
             &DocumentConfig::default(),
+            "tok",
         );
         assert!(html.contains("img-src 'self' data:"));
         assert!(!html.contains("img-src 'self' https:"));
@@ -417,7 +438,7 @@ mod tests {
             allow_remote_images: true,
             ..DocumentConfig::default()
         };
-        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config);
+        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config, "tok");
         assert!(html.contains("img-src 'self' https: http: data:"));
     }
 
@@ -429,7 +450,7 @@ mod tests {
             readable_column: true,
             ..DocumentConfig::default()
         };
-        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config);
+        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config, "tok");
         let classes = html_root_class_attr(&html);
         assert_eq!(classes, "is-readable-column");
     }

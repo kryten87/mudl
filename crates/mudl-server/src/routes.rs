@@ -19,9 +19,15 @@ pub enum Route {
     Document(Mode),
     /// `/assets/<name>` — a bundled, embedded static asset.
     Asset(String),
-    /// `/local/<percent-encoded-path>` — a local file referenced by the
-    /// document (e.g. a relative image), percent-decoded.
-    LocalFile(String),
+    /// `/local/<token>/<percent-encoded-path>` — a local file referenced by
+    /// the document (e.g. a relative image), percent-decoded. `token` must
+    /// match the serving `DocumentSource`'s own per-instance random token
+    /// before `server.rs`'s `serve_local_file` will treat `path` as
+    /// legitimate (`docs/SECURITY.md` Finding 2's first hardening step) —
+    /// dispatch only extracts the two segments, it doesn't itself check the
+    /// token, since routing here has no access to the `DocumentSource` that
+    /// knows the expected value.
+    LocalFile { token: String, path: String },
     /// `/wait?since=N` — long-poll for the next change past version `N`.
     WaitForChange(u64),
     NotFound,
@@ -42,14 +48,18 @@ pub fn dispatch(req: &Request) -> Route {
                 } else {
                     Route::Asset(name.to_string())
                 }
-            } else if let Some(encoded) = path.strip_prefix("/local/") {
-                if encoded.is_empty() {
-                    Route::NotFound
-                } else {
-                    match percent_decode(encoded) {
-                        Some(decoded) => Route::LocalFile(decoded),
-                        None => Route::NotFound,
+            } else if let Some(after_prefix) = path.strip_prefix("/local/") {
+                match after_prefix.split_once('/') {
+                    Some((token, encoded)) if !token.is_empty() && !encoded.is_empty() => {
+                        match percent_decode(encoded) {
+                            Some(path) => Route::LocalFile {
+                                token: token.to_string(),
+                                path,
+                            },
+                            None => Route::NotFound,
+                        }
                     }
+                    _ => Route::NotFound,
                 }
             } else {
                 Route::NotFound
@@ -153,10 +163,13 @@ mod tests {
     }
 
     #[test]
-    fn local_path_is_percent_decoded() {
+    fn local_path_token_and_path_are_split_and_path_is_percent_decoded() {
         assert_eq!(
-            dispatch(&req("/local/%2Fhome%2Fuser%2Fnotes.md", &[])),
-            Route::LocalFile("/home/user/notes.md".to_string())
+            dispatch(&req("/local/tok123/%2Fhome%2Fuser%2Fnotes.md", &[])),
+            Route::LocalFile {
+                token: "tok123".to_string(),
+                path: "/home/user/notes.md".to_string(),
+            }
         );
     }
 
@@ -166,13 +179,24 @@ mod tests {
     }
 
     #[test]
+    fn local_path_with_only_a_token_and_no_path_is_not_found() {
+        assert_eq!(dispatch(&req("/local/tok123", &[])), Route::NotFound);
+        assert_eq!(dispatch(&req("/local/tok123/", &[])), Route::NotFound);
+    }
+
+    #[test]
+    fn local_path_with_empty_token_is_not_found() {
+        assert_eq!(dispatch(&req("/local//%2Fetc%2Fpasswd", &[])), Route::NotFound);
+    }
+
+    #[test]
     fn local_path_invalid_percent_encoding_is_not_found() {
-        assert_eq!(dispatch(&req("/local/%zz", &[])), Route::NotFound);
+        assert_eq!(dispatch(&req("/local/tok123/%zz", &[])), Route::NotFound);
     }
 
     #[test]
     fn local_path_truncated_percent_encoding_is_not_found() {
-        assert_eq!(dispatch(&req("/local/abc%2", &[])), Route::NotFound);
+        assert_eq!(dispatch(&req("/local/tok123/abc%2", &[])), Route::NotFound);
     }
 
     #[test]
