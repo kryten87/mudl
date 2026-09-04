@@ -38,4 +38,5 @@ depends = "$auto"
 assets = [
     ["target/release/mudl", "usr/bin/mudl", "755"],
     ["../../resources/mudl.desktop", "usr/share/applications/mudl.desktop", "644"],
+    ["../../resources/mudl.png", "usr/share/icons/hicolor/256x256/apps/mudl.png", "644"],
 ]

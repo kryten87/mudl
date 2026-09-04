@@ -5,9 +5,10 @@
 # `update-desktop-database` on that applications directory.
 #
 # Assumes `mudl` is reachable on $PATH (see the Phase 11.1 CLI installer,
-# which symlinks it into ~/.local/bin). Icon= names a hicolor-theme icon
-# (mudl.svg/.png) to be installed alongside by Phase 12 packaging — not
-# yet present in this repo.
+# which symlinks it into ~/.local/bin). Icon= names a hicolor-theme icon;
+# see resources/mudl.png, installed to
+# usr/share/icons/hicolor/256x256/apps/mudl.png by Phase 12 packaging
+# (crates/mudl-cli/Cargo.toml's [package.metadata.deb] assets).
 [Desktop Entry]
 Type=Application
 Version=1.0
