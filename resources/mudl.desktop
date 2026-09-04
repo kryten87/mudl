@@ -6,8 +6,8 @@
 #
 # Assumes `mudl` is reachable on $PATH (see the Phase 11.1 CLI installer,
 # which symlinks it into ~/.local/bin). Icon= names a hicolor-theme icon;
-# see resources/mudl.png, installed to
-# usr/share/icons/hicolor/256x256/apps/mudl.png by Phase 12 packaging
+# see resources/icons/mudl-*.png, installed across the standard hicolor
+# size directories (16..512) by Phase 12 packaging
 # (crates/mudl-cli/Cargo.toml's [package.metadata.deb] assets).
 [Desktop Entry]
 Type=Application

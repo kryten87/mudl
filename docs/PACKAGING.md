@@ -45,7 +45,8 @@ This produces `target/debian/mudl_<version>-1_<arch>.deb`, containing:
 - `usr/bin/mudl` — the release binary
 - `usr/share/applications/mudl.desktop` — the desktop entry and
   `text/markdown` MIME association from Phase 11.2
-- `usr/share/icons/hicolor/256x256/apps/mudl.png` — the application icon
+- `usr/share/icons/hicolor/{16,24,32,48,64,96,128,256,512}x*/apps/mudl.png`
+  — the application icon, at each standard hicolor size
 - `usr/share/doc/mudl/copyright` — generated from `LICENSE.md`
 
 Install/uninstall like any other package:
@@ -70,10 +71,12 @@ build environment for release artifacts.
 
 ## Application icon
 
-`resources/mudl.png` (226×256, transparent background) is installed to
-`usr/share/icons/hicolor/256x256/apps/mudl.png`, matching
-`resources/mudl.desktop`'s `Icon=mudl`. It's a raster PNG rather than a
-scalable SVG, so it lives in a fixed-size `hicolor` directory instead of
-`hicolor/scalable/apps`; a single 256px asset is standard practice for a
-`.deb` this size and lets the icon theme downscale cleanly for menu/taskbar
-use without needing a full multi-resolution set.
+`resources/icons/mudl-<size>.png` (16, 24, 32, 48, 64, 96, 128, 256, 512;
+transparent background) are installed one per standard hicolor size
+directory — `usr/share/icons/hicolor/<size>x<size>/apps/mudl.png` — matching
+`resources/mudl.desktop`'s `Icon=mudl`. They're raster PNGs rather than a
+scalable SVG, so each lives in its own fixed-size `hicolor` directory
+instead of a single `hicolor/scalable/apps/mudl.svg`; shipping the full
+size set (rather than one PNG for the icon theme to rescale) keeps menu,
+taskbar, and HiDPI rendering crisp at every size a desktop environment
+asks for.
