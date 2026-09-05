@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Bump this workspace's crate versions after validating the new version is
+# greater than the last `v#.#.#` release tag. Does not commit, tag, or push.
+set -euo pipefail
+
+usage() {
+    echo "Usage: $(basename "$0") <new-version>" >&2
+    echo "  e.g. $(basename "$0") 1.2.3" >&2
+    exit 1
+}
+
+[[ $# -eq 1 ]] || usage
+
+new_version="$1"
+
+if [[ ! "$new_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    echo "Error: version must be in the form #.#.# (got '$new_version')" >&2
+    exit 1
+fi
+new_major=$((10#${BASH_REMATCH[1]}))
+new_minor=$((10#${BASH_REMATCH[2]}))
+new_patch=$((10#${BASH_REMATCH[3]}))
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+last_tag="$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V | tail -n1 || true)"
+
+if [[ -n "$last_tag" ]]; then
+    IFS='.' read -r last_major last_minor last_patch <<<"$last_tag"
+    last_major=$((10#$last_major))
+    last_minor=$((10#$last_minor))
+    last_patch=$((10#$last_patch))
+
+    backwards=0
+    if ((new_major < last_major)); then
+        backwards=1
+    elif ((new_major == last_major && new_minor < last_minor)); then
+        backwards=1
+    elif ((new_major == last_major && new_minor == last_minor && new_patch <= last_patch)); then
+        backwards=1
+    fi
+
+    if ((backwards)); then
+        echo "Error: $new_version is not newer than the last release (v$last_tag)" >&2
+        exit 1
+    fi
+fi
+
+manifests=(Cargo.toml crates/*/Cargo.toml)
+updated=()
+
+for manifest in "${manifests[@]}"; do
+    [[ -f "$manifest" ]] || continue
+    grep -q '^\[package\]' "$manifest" || continue
+
+    tmp="$(mktemp)"
+    awk -v new="$new_version" '
+        /^\[package\]/ { in_pkg=1; print; next }
+        /^\[/           { in_pkg=0; print; next }
+        in_pkg && /^version[[:space:]]*=/ {
+            print "version = \"" new "\""
+            next
+        }
+        { print }
+    ' "$manifest" >"$tmp"
+    mv "$tmp" "$manifest"
+    updated+=("$manifest")
+done
+
+if [[ ${#updated[@]} -eq 0 ]]; then
+    echo "Error: no [package] version fields found to update" >&2
+    exit 1
+fi
+
+echo "Bumped version to $new_version in:"
+printf '  %s\n' "${updated[@]}"
+
+if command -v cargo >/dev/null 2>&1; then
+    echo "Refreshing Cargo.lock..."
+    cargo check -q --workspace || echo "Warning: 'cargo check' failed; Cargo.lock may be stale" >&2
+fi
