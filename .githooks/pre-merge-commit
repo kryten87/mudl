@@ -1,0 +1,21 @@
+#!/bin/sh
+# Blocks a local merge commit (git merge) unless it passes the same checks
+# CI runs: cargo fmt --check, clippy -D warnings, and the test suite.
+#
+# This does NOT gate the "Merge pull request" button on GitHub - that's a
+# server-side action and needs a branch protection rule requiring the CI
+# check instead. It also does not fire for fast-forward merges, since git
+# creates no merge commit (and so runs no hook) in that case.
+#
+# Enable once per clone with:
+#   git config core.hooksPath .githooks
+
+set -e
+
+if command -v just >/dev/null 2>&1; then
+    just ci
+else
+    cargo fmt --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+fi

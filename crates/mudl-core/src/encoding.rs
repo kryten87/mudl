@@ -17,15 +17,14 @@ const BASE64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 
 pub fn base64_encode(bytes: &[u8]) -> String {
     let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let mut chunks = bytes.chunks_exact(3);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = bytes.as_chunks::<3>();
+    for chunk in chunks {
         let n = (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8 | chunk[2] as u32;
         result.push(BASE64_TABLE[(n >> 18 & 0x3F) as usize] as char);
         result.push(BASE64_TABLE[(n >> 12 & 0x3F) as usize] as char);
         result.push(BASE64_TABLE[(n >> 6 & 0x3F) as usize] as char);
         result.push(BASE64_TABLE[(n & 0x3F) as usize] as char);
     }
-    let remainder = chunks.remainder();
     match remainder.len() {
         1 => {
             let n = (remainder[0] as u32) << 16;

@@ -522,12 +522,7 @@ mod respond_to_tests {
         let filesystem = InMemoryFileSystem::new();
         filesystem.insert("/docs/notes.md", b"# Hello".to_vec());
 
-        let response = respond_to(
-            &req("/"),
-            &version,
-            &filesystem,
-            &document_source(),
-        );
+        let response = respond_to(&req("/"), &version, &filesystem, &document_source());
 
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         let text = String::from_utf8_lossy(&response).into_owned();
@@ -566,12 +561,7 @@ mod respond_to_tests {
             path: "/".to_string(),
             query,
         };
-        let response = respond_to(
-            &req,
-            &version,
-            &filesystem,
-            &document_source(),
-        );
+        let response = respond_to(&req, &version, &filesystem, &document_source());
 
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         let text = String::from_utf8_lossy(&response).into_owned();
@@ -581,12 +571,7 @@ mod respond_to_tests {
     #[test]
     fn document_route_missing_file_is_404() {
         let version = VersionCounter::new();
-        let response = respond_to(
-            &req("/"),
-            &version,
-            &empty_fs(),
-            &document_source(),
-        );
+        let response = respond_to(&req("/"), &version, &empty_fs(), &document_source());
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
     }
 
@@ -708,12 +693,7 @@ mod respond_to_tests {
         });
 
         let start = Instant::now();
-        let response = respond_to(
-            &wait_req(0),
-            &version,
-            &empty_fs(),
-            &document_source(),
-        );
+        let response = respond_to(&wait_req(0), &version, &empty_fs(), &document_source());
         assert!(start.elapsed() < WAIT_TIMEOUT);
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert_eq!(body_of(&response), r#"{"version":1}"#);
@@ -722,12 +702,7 @@ mod respond_to_tests {
     #[test]
     fn wait_route_times_out_with_unchanged_version() {
         let version = VersionCounter::new();
-        let response = respond_to(
-            &wait_req(0),
-            &version,
-            &empty_fs(),
-            &document_source(),
-        );
+        let response = respond_to(&wait_req(0), &version, &empty_fs(), &document_source());
         assert_eq!(status_line(&response), "HTTP/1.1 200 OK");
         assert_eq!(body_of(&response), r#"{"version":0}"#);
     }

@@ -58,6 +58,16 @@ target/release/mudl --install-cli    # symlinks into ~/.local/bin/mudl
 
 See `docs/PACKAGING.md` for pre-built `.deb` packaging.
 
+### Git hooks
+
+The repo ships a `pre-merge-commit` hook that runs the same checks as CI
+(`just ci`: fmt check, clippy, tests) before a local merge commit is created.
+Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ### Desktop integration
 
 Copy `resources/mudl.desktop` to `~/.local/share/applications/mudl.desktop`

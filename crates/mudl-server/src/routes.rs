@@ -27,7 +27,10 @@ pub enum Route {
     /// dispatch only extracts the two segments, it doesn't itself check the
     /// token, since routing here has no access to the `DocumentSource` that
     /// knows the expected value.
-    LocalFile { token: String, path: String },
+    LocalFile {
+        token: String,
+        path: String,
+    },
     /// `/wait?since=N` — long-poll for the next change past version `N`.
     WaitForChange(u64),
     NotFound,
@@ -186,7 +189,10 @@ mod tests {
 
     #[test]
     fn local_path_with_empty_token_is_not_found() {
-        assert_eq!(dispatch(&req("/local//%2Fetc%2Fpasswd", &[])), Route::NotFound);
+        assert_eq!(
+            dispatch(&req("/local//%2Fetc%2Fpasswd", &[])),
+            Route::NotFound
+        );
     }
 
     #[test]
