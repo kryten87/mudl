@@ -1,0 +1,11 @@
+[package]
+name = "mudl-core"
+version = "1.0.0"
+edition.workspace = true
+
+[dependencies]
+# default-features off: we only need the core event-stream parser (Options::
+# ENABLE_* flags are always available), not the crate's own bundled `html`
+# pretty-printer (mudl-core writes its own visitor) or its `getopts` CLI helper.
+pulldown-cmark = { version = "0.13", default-features = false }
+mudl-comments = { path = "../mudl-comments" }

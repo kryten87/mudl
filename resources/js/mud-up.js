@@ -1,0 +1,318 @@
+// mudl - Up Mode helpers.
+// Auto-detects context via .up-mode-output; no-ops otherwise.
+//
+// `mud`'s version of this file routed link clicks and footnote-marker clicks
+// through a native Swift message-handler bridge (`window.webkit.messageHandlers`).
+// This architecture has no such bridge at all (see
+// docs/IMPLEMENTATION-PLAN.md Phase 10.2): `mudl-server` is a plain HTTP
+// server, so a relative link to another `.md` file already works via normal
+// browser navigation, and footnotes render as an on-page bottom section, so
+// the default anchor-jump-to-`#fn-N` behavior a plain `<a href="#fn-N">`
+// gives for free is already correct. Both kinds of click are simply left to
+// the browser; there is nothing to intercept.
+
+// -- Foldable headings -------------------------------------------------------
+
+// With the "Foldable headings" setting on (the `is-foldable-headings` root
+// class), every h2-and-deeper heading gets an arrow button at its right edge,
+// and clicking that button folds the heading's section away: the blocks that
+// follow it, up to the next heading of the same or higher rank, sub-sections
+// included.
+//
+// The slugs of the folded headings are the whole state. Every change recomputes
+// the page's visibility from that set in one pass, because "unfold this
+// section" is not "show these blocks" — a sub-section folded inside it has to
+// stay folded.
+//
+// A reload replaces the document, so the app holds the set for the window
+// (WebView.Coordinator) and replays it through `apply` on the new page.
+
+(function () {
+  "use strict";
+
+  var article = document.querySelector(".up-mode-output");
+  if (!article) return;
+  // A footnote popover is its own page, rendered with the document's options —
+  // this class included. Nothing in a popover is a section to fold.
+  if (document.documentElement.classList.contains("footnote-popover")) return;
+
+  // The arrow, drawn pointing down (the open state). HTMLTemplate.mudUpJS
+  // substitutes the contents of fold-arrow.svg for this placeholder, so the
+  // shape is drawn in one file rather than restated here.
+  var ARROW_SVG = "__MUD_FOLD_ARROW_SVG__";
+
+  // The folded headings, one `slug: true` entry each. Prototype-less, because
+  // a slug is document text: a heading called "Constructor" would otherwise
+  // find `Object.prototype.constructor` and read as already folded.
+  var folded = Object.create(null);
+
+  function enabled() {
+    return document.documentElement.classList.contains("is-foldable-headings");
+  }
+
+  // 2–6 for a foldable heading, 1 for an h1 (the document title, not a section
+  // anyone folds), 0 for everything else.
+  function headingLevel(el) {
+    var tag = el.tagName;
+    if (!tag || tag.length !== 2 || tag.charAt(0) !== "H") return 0;
+    var level = +tag.charAt(1);
+    return level >= 1 && level <= 6 ? level : 0;
+  }
+
+  // -- Arrows ---------------------------------------------------------------
+
+  function arrowIn(heading) {
+    return heading.querySelector(".mud-fold-arrow");
+  }
+
+  // Only a heading that is the article's own child begins a section: one
+  // nested in a blockquote, a list item, or a footnote body has no following
+  // siblings to fold, so it gets no arrow either.
+  var FOLDABLE = ":scope > h2, :scope > h3, :scope > h4, :scope > h5," +
+    " :scope > h6";
+
+  function addArrows() {
+    var headings = article.querySelectorAll(FOLDABLE);
+    for (var i = 0; i < headings.length; i++) {
+      if (arrowIn(headings[i])) continue;
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "mud-fold-arrow";
+      button.innerHTML = ARROW_SVG;
+      headings[i].appendChild(button);
+    }
+  }
+
+  function removeArrows() {
+    var arrows = article.querySelectorAll(".mud-fold-arrow");
+    for (var i = 0; i < arrows.length; i++) {
+      arrows[i].parentNode.removeChild(arrows[i]);
+    }
+  }
+
+  function labelArrow(heading, isFolded) {
+    var arrow = arrowIn(heading);
+    if (!arrow) return;
+    arrow.setAttribute("aria-expanded", isFolded ? "false" : "true");
+    arrow.setAttribute(
+      "aria-label", isFolded ? "Unfold section" : "Fold section");
+  }
+
+  // -- The visibility pass --------------------------------------------------
+
+  // Recompute what is on screen from the folded set: one walk down the
+  // article's children carrying the folded headings whose sections are still
+  // open, outermost first. A block is hidden when that list isn't empty.
+  function refresh() {
+    var open = [];
+    var children = article.children;
+    for (var i = 0; i < children.length; i++) {
+      var el = children[i];
+      // Change overlays are absolutely positioned siblings rather than part of
+      // the flow, and mud-changes.js already hides one whose blocks have all
+      // gone. Leave them to it.
+      if (el.classList.contains("mud-overlay")) continue;
+      var level = headingLevel(el);
+      if (!level) {
+        setHidden(el, open);
+        continue;
+      }
+      // This heading ends every open section of its own rank or deeper.
+      while (open.length && open[open.length - 1].level >= level) open.pop();
+      setHidden(el, open);
+      var isFolded = level > 1 && folded[el.id] === true;
+      el.classList.toggle("is-folded", isFolded);
+      labelArrow(el, isFolded);
+      if (isFolded) open.push({ level: level, id: el.id });
+    }
+  }
+
+  // Hide or show one block, and while it is hidden record which heading is
+  // doing the hiding — `open[0]`, the outermost, which is the only one of them
+  // still on screen. `hiding` reads the stamp back instead of walking the
+  // article again, so the answer comes from the pass that made the decision.
+  function setHidden(el, open) {
+    if (open.length) {
+      el.classList.add("is-fold-hidden");
+      el.setAttribute("data-fold-host", open[0].id);
+    } else {
+      el.classList.remove("is-fold-hidden");
+      el.removeAttribute("data-fold-host");
+    }
+  }
+
+  // Folded-heading state isn't persisted anywhere in this architecture (no
+  // native bridge to report it to) — it simply resets on the next reload.
+  function report() {}
+
+  function toggle(slug) {
+    if (folded[slug]) {
+      delete folded[slug];
+    } else {
+      folded[slug] = true;
+    }
+    refresh();
+    report();
+  }
+
+  // Fold or unfold the whole document — the View menu's Fold Headings and
+  // Unfold Headings. Fold takes every rank, h2 down to h6, so unfolding one
+  // section reveals its sub-sections still folded.
+  //
+  // Both replace the set rather than adding to it, which drops any slug that
+  // is no longer a heading in this document. That is the point of a document-
+  // wide command: what it leaves behind is what is on the page.
+  function foldAll() {
+    if (!enabled()) return;
+    var headings = article.querySelectorAll(FOLDABLE);
+    folded = Object.create(null);
+    for (var i = 0; i < headings.length; i++) {
+      if (headings[i].id) folded[headings[i].id] = true;
+    }
+    refresh();
+    report();
+  }
+
+  function unfoldAll() {
+    if (!enabled()) return;
+    folded = Object.create(null);
+    refresh();
+    report();
+  }
+
+  // -- Revealing ------------------------------------------------------------
+
+  // The article child holding `el` (`el` itself when it is one), or null when
+  // `el` is outside the article — the bottom Comments section, say.
+  function blockOf(el) {
+    while (el && el.parentElement && el.parentElement !== article) {
+      el = el.parentElement;
+    }
+    return el && el.parentElement === article ? el : null;
+  }
+
+  // Open every folded section enclosing `el` — and `el` itself when it is a
+  // folded heading — so a navigation can land on it. Walking back from its
+  // block, each heading that outranks the closest one seen so far is a section
+  // `el` sits in; the ones in between are sections that have already ended.
+  //
+  // With the setting off nothing is hidden, so there is nothing to reveal —
+  // and dropping slugs from the set would break `setEnabled`'s promise that
+  // turning the setting back on restores the same folds.
+  //
+  // Returns true when something was opened, so a caller knows the document
+  // moved under it and may need to scroll again.
+  function reveal(el) {
+    if (!enabled()) return false;
+    var block = blockOf(el);
+    if (!block) return false;
+    var rank = 7;
+    var opened = false;
+    for (var node = block; node; node = node.previousElementSibling) {
+      var level = headingLevel(node);
+      if (!level || level >= rank) continue;
+      rank = level;
+      if (folded[node.id]) {
+        delete folded[node.id];
+        opened = true;
+      }
+      if (level === 1) break;   // nothing encloses an h1
+    }
+    if (!opened) return false;
+    refresh();
+    report();
+    return true;
+  }
+
+  function revealHeading(slug) {
+    return reveal(document.getElementById(slug));
+  }
+
+  // The fold hiding `el`, or null when `el` is on screen (which includes every
+  // element while the setting is off, since nothing is hidden then). Two
+  // fields:
+  //
+  //   key  an opaque grouping string; every element one fold hid shares it.
+  //        (It is the hiding heading's slug, but no caller needs to know.)
+  //   top  the bottom of that heading, as a position from the document top in
+  //        layout (pre-zoom) pixels. A line in the document to sit on, not a
+  //        position for any particular thing.
+  //
+  // The Comments column asks: a comment whose quotation has been folded away
+  // still needs somewhere to put a stand-in for itself.
+  function hiding(el) {
+    if (!enabled()) return null;
+    var block = blockOf(el);
+    var key = block && block.getAttribute("data-fold-host");
+    var heading = key ? document.getElementById(key) : null;
+    if (!heading) return null;
+    // mud.js converts the rect; `offsetHeight` is already in layout pixels.
+    var top = Mud.geometry.layoutTopFromRect(heading.getBoundingClientRect());
+    return { key: key, top: top + heading.offsetHeight };
+  }
+
+  // -- Clicks ---------------------------------------------------------------
+
+  // A click on the arrow folds or unfolds its section.
+  article.addEventListener("click", function (e) {
+    if (!enabled()) return;
+    var arrow = e.target.closest(".mud-fold-arrow");
+    if (!arrow) return;
+    var heading = arrow.parentElement;
+    if (!heading || !heading.id || heading.parentElement !== article) return;
+    toggle(heading.id);
+  });
+
+  // In-page links: WebKit can't scroll to a target inside a folded section, so
+  // open the section first and do the scroll here. Comment markers and
+  // footnote references have their own click handling (or, for footnotes,
+  // just the default anchor jump) and are left alone.
+  article.addEventListener("click", function (e) {
+    if (!enabled()) return;
+    var link = e.target.closest('a[href^="#"]');
+    if (!link) return;
+    if (link.classList.contains("mud-comment-marker") ||
+        link.hasAttribute("data-footnote-ref")) return;
+    var id = decodeURIComponent(link.getAttribute("href").slice(1));
+    var target = id ? document.getElementById(id) : null;
+    if (!target) return;
+    e.preventDefault();
+    reveal(target);
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
+  // -- Public namespace -----------------------------------------------------
+
+  function setEnabled(on) {
+    if (on) {
+      addArrows();
+      refresh();
+    } else {
+      removeArrows();
+      // The hiding rule is scoped to the root class, so everything is back on
+      // screen already. The set stays, so turning the setting on again restores
+      // the same folds.
+    }
+  }
+
+  // The app replays this window's folds on a freshly loaded page. Nothing is
+  // reported back: this set came from the app in the first place.
+  function apply(slugs) {
+    folded = Object.create(null);
+    for (var i = 0; i < slugs.length; i++) folded[slugs[i]] = true;
+    if (enabled()) refresh();
+  }
+
+  window.Mud = window.Mud || {};
+  window.Mud.folds = {
+    setEnabled: setEnabled,
+    apply: apply,
+    foldAll: foldAll,
+    unfoldAll: unfoldAll,
+    reveal: reveal,
+    revealHeading: revealHeading,
+    hiding: hiding
+  };
+
+  if (enabled()) addArrows();
+})();

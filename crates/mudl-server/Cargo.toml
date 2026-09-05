@@ -1,0 +1,8 @@
+[package]
+name = "mudl-server"
+version = "1.0.0"
+edition.workspace = true
+
+[dependencies]
+mudl-core = { path = "../mudl-core" }
+mudl-watch = { path = "../mudl-watch" }

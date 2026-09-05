@@ -1,0 +1,61 @@
+name: CI
+
+# Run on pushes to develop/main and on any PR targeting them. This repo's
+# integration branch is `develop` (per the workspace's default branch setup),
+# with `main` as the stable/release branch, so those are the two branches
+# whose CI status actually matters. This choice isn't load-bearing: switching
+# to "any branch" (omitting the `branches:` filter) would also be reasonable
+# and would just mean feature branches get their own status checks before a
+# PR is even opened. Restricting to develop/main keeps CI minutes focused on
+# the branches that gate merges.
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+    branches:
+      - develop
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test, fmt, clippy
+    # Pinned to 22.04 deliberately: Ubuntu 22.04 is mudl's actual target
+    # platform (see docs/IMPLEMENTATION-PLAN.md), not just an arbitrary CI
+    # runner choice, so we want CI to build and lint against the same GTK 3 /
+    # WebKitGTK library versions the app will ship against.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        # libgtk-3-dev and libwebkit2gtk-4.1-dev are needed for mudl-gui.
+        # mudl-gui is currently a placeholder crate, but adding these now
+        # means CI won't need a follow-up change once it grows real code.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

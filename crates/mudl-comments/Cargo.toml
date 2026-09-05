@@ -1,0 +1,9 @@
+[package]
+name = "mudl-comments"
+version = "1.0.0"
+edition.workspace = true
+
+[dependencies]
+# default-features off: same rationale as mudl-core — only the event-stream
+# parser is needed, not the crate's bundled HTML writer or CLI helper.
+pulldown-cmark = { version = "0.13", default-features = false }

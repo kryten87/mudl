@@ -1,0 +1,130 @@
+/* -- Down Mode ------------------------------------------------------------ */
+
+.down-mode-output {
+  margin: 0 auto;
+  min-height: 100%;
+  box-sizing: border-box;
+  background: var(--bg-color);
+  overflow-x: auto;
+  overscroll-behavior-x: none;
+}
+
+.is-readable-column .down-mode-output {
+  max-width: calc(800px + 4em);
+}
+
+
+/* -- Line container ------------------------------------------------------- */
+
+/* `mudl_core::render::render_down` emits one `<div class="line"
+   data-line="N">` per source line (a deliberate simplification over
+   `mud`'s own `.dl`/`.ln`/`.lc` split-container line structure — see
+   `docs/IMPLEMENTATION-PLAN.md` Phase 2.4's "actual numbering is
+   CSS-driven" note) — line numbers below are generated from a CSS
+   counter on `.line` itself, not a separate sibling element. */
+
+.down-mode-output {
+  counter-reset: line;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.875em;
+  line-height: 1.6;
+}
+
+.line {
+  position: relative;
+  padding: 0 1em 0 4.5em;
+}
+
+.line:first-child {
+  padding-top: 2rem;
+}
+
+.line:last-child {
+  padding-bottom: 6rem; /* Space for floating bars beneath */
+}
+
+
+/* -- Line numbers --------------------------------------------------------- */
+
+.line::before {
+  counter-increment: line;
+  content: counter(line);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 3.5em;
+  padding-right: 1em;
+  text-align: right;
+  font-size: 0.85em;
+  font-weight: 300;
+  user-select: none;
+  -webkit-user-select: none;
+  color: color-mix(in srgb, var(--blockquote-color), var(--bg-color));
+}
+
+html:not(.has-line-numbers) .line {
+  padding-left: 1em;
+}
+
+html:not(.has-line-numbers) .line::before {
+  content: none;
+}
+
+
+/* -- Word wrap -------------------------------------------------------------
+   `.line`'s text is raw source (leading whitespace is meaningful), so the
+   default is `pre` — preserved verbatim, no wrapping, horizontal scroll via
+   `.down-mode-output`'s own `overflow-x: auto` when a line is long. Toggling
+   Word Wrap on switches to `pre-wrap`, wrapping long lines within the
+   viewport instead. */
+
+.line {
+  white-space: pre;
+}
+
+.has-word-wrap .line {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+
+/* -- AST-based syntax highlighting ---------------------------------------- */
+
+.md-heading   { color: var(--heading-color); }
+.md-code-block  { color: var(--code-fg); }
+.md-code-fence  { color: var(--syntax-comment); }
+.md-code-info   { color: var(--syntax-constant); }
+.md-code    { color: var(--code-fg); }
+.md-emphasis  { font-style: italic; }
+.md-strong    { font-weight: bold; }
+.md-link    { color: var(--link-color); }
+.md-footnote-ref,
+.md-footnote-def  { color: var(--link-color); }
+.md-image     { color: var(--syntax-constant); }
+.md-blockquote  { color: var(--syntax-comment); font-style: italic; }
+.md-strikethrough {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 30%, transparent);
+}
+
+/* Alert tag colorization */
+.md-alert-note .md-alert-tag    { color: var(--alert-note-border);    font-style: normal; font-weight: bold; }
+.md-alert-tip .md-alert-tag     { color: var(--alert-tip-border);     font-style: normal; font-weight: bold; }
+.md-alert-important .md-alert-tag { color: var(--alert-important-border); font-style: normal; font-weight: bold; }
+.md-alert-status .md-alert-tag  { color: var(--alert-status-border);  font-style: normal; font-weight: bold; }
+.md-alert-warning .md-alert-tag   { color: var(--alert-warning-border);   font-style: normal; font-weight: bold; }
+.md-alert-caution .md-alert-tag   { color: var(--alert-caution-border);   font-style: normal; font-weight: bold; }
+.md-hr      { color: var(--syntax-comment); }
+.md-html    { color: var(--syntax-keyword); }
+
+
+/* -- Frontmatter ---------------------------------------------------------- */
+
+.fm-fence .lc,
+.fm-code .lc {
+  background: var(--code-bg);
+}
+
+.fm-fence .lc {
+  opacity: 0.5;
+}
