@@ -816,7 +816,12 @@ fn start_server_for(
     let document_for_thread = Arc::clone(&document);
     let version_for_server = version.clone();
     thread::spawn(move || {
-        server::serve(listener, version_for_server, filesystem, document_for_thread)
+        server::serve(
+            listener,
+            version_for_server,
+            filesystem,
+            document_for_thread,
+        )
     });
 
     let watch_source = mudl_watch::PollingChangeSource::new(
