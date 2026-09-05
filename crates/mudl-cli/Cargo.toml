@@ -38,4 +38,13 @@ depends = "$auto"
 assets = [
     ["target/release/mudl", "usr/bin/mudl", "755"],
     ["../../resources/mudl.desktop", "usr/share/applications/mudl.desktop", "644"],
+    ["../../resources/icons/mudl-16.png", "usr/share/icons/hicolor/16x16/apps/mudl.png", "644"],
+    ["../../resources/icons/mudl-24.png", "usr/share/icons/hicolor/24x24/apps/mudl.png", "644"],
+    ["../../resources/icons/mudl-32.png", "usr/share/icons/hicolor/32x32/apps/mudl.png", "644"],
+    ["../../resources/icons/mudl-48.png", "usr/share/icons/hicolor/48x48/apps/mudl.png", "644"],
+    ["../../resources/icons/mudl-64.png", "usr/share/icons/hicolor/64x64/apps/mudl.png", "644"],
+    ["../../resources/icons/mudl-96.png", "usr/share/icons/hicolor/96x96/apps/mudl.png", "644"],
+    ["../../resources/icons/mudl-128.png", "usr/share/icons/hicolor/128x128/apps/mudl.png", "644"],
+    ["../../resources/icons/mudl-256.png", "usr/share/icons/hicolor/256x256/apps/mudl.png", "644"],
+    ["../../resources/icons/mudl-512.png", "usr/share/icons/hicolor/512x512/apps/mudl.png", "644"],
 ]
