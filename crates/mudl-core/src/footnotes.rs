@@ -1,19 +1,14 @@
-const COMMENT_LABEL_PREFIX: &str = "comment-";
-
 /// True when `label` is a comment label (`comment-` followed by one or more
 /// `[\w-]` characters) rather than an authorial footnote label. Mirrors
 /// `FootnoteProcessor.isCommentLabel` in the Swift reference, including its
 /// Unicode-aware notion of "word character" (`Character.isLetter` /
 /// `Character.isNumber`, not ASCII-only), so labels written with non-ASCII
 /// letters stay classified the same way on both ports.
-pub fn is_comment_label(label: &str) -> bool {
-    match label.strip_prefix(COMMENT_LABEL_PREFIX) {
-        Some(suffix) if !suffix.is_empty() => suffix
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-'),
-        _ => false,
-    }
-}
+///
+/// Re-exported from `mudl-diff`, which sits at the bottom of the dependency
+/// graph: change tracking must agree with rendering on what a comment is,
+/// so there is exactly one definition.
+pub use mudl_diff::is_comment_label;
 
 #[cfg(test)]
 mod tests {
