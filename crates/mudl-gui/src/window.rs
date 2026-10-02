@@ -693,7 +693,11 @@ fn open_in_new_window(path: &Path) {
 /// re-navigates the WebView to `/` with `?mode=down` when the new mode is
 /// Down (its absence already means Up — see `mudl_server::routes::dispatch`).
 /// Connected on the tab's own container (see the module doc comment on
-/// per-tab shortcut scoping), not the shared window.
+/// per-tab shortcut scoping), not the shared window — and also on the
+/// WebView itself: WebKit consumes Space (to scroll the page) in its class
+/// handler, so it never bubbles up to the container while the document has
+/// focus. A handler connected on the WebView runs before that class
+/// handler, so it gets Space first.
 fn connect_mode_toggle(
     tab_container: &gtk::Box,
     webview: &webkit2gtk::WebView,
@@ -701,17 +705,25 @@ fn connect_mode_toggle(
     mode: Rc<Cell<Mode>>,
     pending_scroll_fraction: Rc<Cell<f64>>,
 ) {
-    let webview = webview.clone();
-    tab_container.connect_key_press_event(move |_widget, event| {
-        if event.keyval() != gtk::gdk::keys::constants::space {
-            return gtk::glib::Propagation::Proceed;
+    let make_handler = || {
+        let webview = webview.clone();
+        let mode = Rc::clone(&mode);
+        let pending_scroll_fraction = Rc::clone(&pending_scroll_fraction);
+        move |event: &gtk::gdk::EventKey| {
+            if event.keyval() != gtk::gdk::keys::constants::space {
+                return gtk::glib::Propagation::Proceed;
+            }
+
+            let target = next_mode(mode.get());
+            navigate_to_mode(&webview, addr, &mode, &pending_scroll_fraction, target);
+
+            gtk::glib::Propagation::Stop
         }
-
-        let target = next_mode(mode.get());
-        navigate_to_mode(&webview, addr, &mode, &pending_scroll_fraction, target);
-
-        gtk::glib::Propagation::Stop
-    });
+    };
+    let handler = make_handler();
+    tab_container.connect_key_press_event(move |_, event| handler(event));
+    let handler = make_handler();
+    webview.connect_key_press_event(move |_, event| handler(event));
 }
 
 /// Captures the current scroll fraction, sets `mode` to `target`, and
