@@ -30,13 +30,24 @@
   line-height: 1.6;
 }
 
+/* A blank source line is an empty `.line`, which has no line box and would
+   collapse to zero height — and since the absolutely positioned number in
+   `::before` contributes no height either, the blank line's number would be
+   drawn underneath the next line's. `min-height` of one line (1.6em matches
+   the inherited `line-height: 1.6`) keeps every line exactly one row tall. */
 .line {
   position: relative;
+  min-height: 1.6em;
   padding: 0 1em 0 4.5em;
 }
 
 .line:first-child {
   padding-top: 2rem;
+}
+
+/* Keep the first line's number level with its text, below the top padding. */
+.line:first-child::before {
+  top: 2rem;
 }
 
 .line:last-child {
