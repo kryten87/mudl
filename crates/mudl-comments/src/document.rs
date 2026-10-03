@@ -24,9 +24,10 @@ fn parser_options() -> Options {
 
 /// True when `label` is a comment label (`comment-` followed by one or more
 /// `[\w-]` characters) rather than an authorial footnote label. Mirrors
-/// `mudl_core::footnotes::is_comment_label` -- duplicated rather than
-/// imported, since `mudl-core` depends on this crate, not the other way
-/// around.
+/// `mudl_diff::is_comment_label` (re-exported as
+/// `mudl_core::footnotes::is_comment_label`) -- duplicated rather than
+/// imported, so this crate keeps no internal dependencies (`mudl-core`
+/// depends on it, not the other way around).
 fn is_comment_label(label: &str) -> bool {
     match label.strip_prefix("comment-") {
         Some(suffix) if !suffix.is_empty() => suffix

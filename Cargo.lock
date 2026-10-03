@@ -453,8 +453,13 @@ name = "mudl-core"
 version = "1.0.3"
 dependencies = [
  "mudl-comments",
+ "mudl-diff",
  "pulldown-cmark",
 ]
+
+[[package]]
+name = "mudl-diff"
+version = "1.0.3"
 
 [[package]]
 name = "mudl-gui"

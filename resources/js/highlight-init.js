@@ -25,6 +25,10 @@
     function (code) {
       if (code.classList.contains("language-mermaid")) return;
       if (code.classList.contains("language-math")) return;
+      // A change-tracked code block with a line diff (`pre.mud-code-diff`)
+      // holds one `<span class="cl">` per line with word markers inside;
+      // highlighting would replace them. Shown unhighlighted for now.
+      if (code.closest("pre.mud-code-diff")) return;
       hljs.highlightElement(code);
     }
   );

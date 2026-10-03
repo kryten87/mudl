@@ -25,21 +25,37 @@
 // plain Markdown instead, since each line is highlighted with no memory of
 // the lines around it.
 
+// Change tracking: a changed row carries its changed words as
+// `data-word-ins` / `data-word-del` character ranges rather than inline
+// `<ins>`/`<del>` (which the `innerHTML` swap below would wipe), and
+// mud-changes.js — loaded before this file whenever the page has change
+// markup — wraps them once the row is highlighted. Without highlight.js the
+// rows keep their escaped text and still get their markers.
+
 (function () {
   "use strict";
   if (!document.querySelector(".down-mode-output")) return;
-  if (typeof hljs === "undefined") return;
+  var highlight = typeof hljs !== "undefined";
+  var changes = window.Mud && window.Mud.changes;
+  var markWords = changes && changes.applyWordMarkers;
+  if (!highlight && !markWords) return;
 
   var lines = document.querySelectorAll(".down-mode-output .line");
   for (var i = 0; i < lines.length; i++) {
     var el = lines[i];
-    // .textContent decodes the entities render_down escaped, handing
-    // highlight.js the plain source text it expects.
-    var text = el.textContent;
-    try {
-      el.innerHTML = hljs.highlight(text, { language: "markdown" }).value;
-    } catch (e) {
-      // Leave the line's original (already-escaped) markup in place.
+    if (highlight) {
+      // .textContent decodes the entities render_down escaped, handing
+      // highlight.js the plain source text it expects.
+      var text = el.textContent;
+      try {
+        el.innerHTML = hljs.highlight(text, { language: "markdown" }).value;
+      } catch (e) {
+        // Leave the line's original (already-escaped) markup in place.
+      }
+    }
+    if (markWords &&
+        (el.hasAttribute("data-word-ins") || el.hasAttribute("data-word-del"))) {
+      markWords(el);
     }
   }
 })();

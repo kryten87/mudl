@@ -128,14 +128,3 @@ html:not(.has-line-numbers) .line::before {
 .md-hr      { color: var(--syntax-comment); }
 .md-html    { color: var(--syntax-keyword); }
 
-
-/* -- Frontmatter ---------------------------------------------------------- */
-
-.fm-fence .lc,
-.fm-code .lc {
-  background: var(--code-bg);
-}
-
-.fm-fence .lc {
-  opacity: 0.5;
-}

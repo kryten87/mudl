@@ -52,7 +52,13 @@
 
   // 2–6 for a foldable heading, 1 for an h1 (the document title, not a section
   // anyone folds), 0 for everything else.
+  //
+  // A deleted heading (change tracking's `mud-change-del`, rendered from the
+  // old document and hidden until its group is expanded) is not a heading of
+  // this document: it has no slug, and letting it end or begin a section
+  // would unfold whatever follows it. It folds like any other block.
   function headingLevel(el) {
+    if (el.classList && el.classList.contains("mud-change-del")) return 0;
     var tag = el.tagName;
     if (!tag || tag.length !== 2 || tag.charAt(0) !== "H") return 0;
     var level = +tag.charAt(1);
@@ -68,8 +74,7 @@
   // Only a heading that is the article's own child begins a section: one
   // nested in a blockquote, a list item, or a footnote body has no following
   // siblings to fold, so it gets no arrow either.
-  var FOLDABLE = ":scope > h2, :scope > h3, :scope > h4, :scope > h5," +
-    " :scope > h6";
+  var FOLDABLE = ":scope > :is(h2, h3, h4, h5, h6):not(.mud-change-del)";
 
   function addArrows() {
     var headings = article.querySelectorAll(FOLDABLE);

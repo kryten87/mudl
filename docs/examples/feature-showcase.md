@@ -108,7 +108,7 @@ f(n) = \begin{cases}
 - [x] Syntax highlighting via highlight.js
 - [x] Emoji shortcodes
 - [x] YAML frontmatter
-- [ ] Change tracking (planned — Phase 13)
+- [x] Change tracking
 - [ ] Footnotes (planned — Phase 14)
 - [ ] Comments (planned — Phase 14)
 
@@ -129,7 +129,7 @@ GFM tables support per-column text alignment using `:` in the separator row.
 | DocC asides      | `> Note: …`          | ✓                    |
 | Status asides    | `> Status: …`        | ✓                    |
 | Frontmatter      | `---` … `---`        | ✓                    |
-| Change tracking  | —                     | planned (Phase 13)  |
+| Change tracking  | —                    | ✓                    |
 | Footnotes        | `text[^1]`           | planned (Phase 14)  |
 | Comments         | `[^comment-1]`       | planned (Phase 14)  |
 
@@ -268,11 +268,18 @@ stateDiagram-v2
 
 ## Change tracking
 
-Change tracking — tinted overlays and gutters marking inserted, deleted, and
-modified content; word-level diffs; a changes sidebar; and git-aware
-"waypoints" to diff against — is planned for mudl as Phase 13 of the
-implementation plan and is not implemented yet. See
-`docs/IMPLEMENTATION-PLAN.md`, §19, for the full design.
+Edit this file in another editor while it's open in mudl and save: the
+reloaded page marks what changed since the document was opened — tinted
+overlays with numbered badges in Up mode, tinted and restored lines in Down
+mode, and word-level highlights in both. The floating Changes bar counts the
+change groups, steps through them (Ctrl-. / Ctrl-,), and accepts them; its
+"Changes since…" popover picks an earlier in-memory snapshot to compare
+against, and the sidebar's Changes pane lists every group. Toggle it all with
+View > Show Changes (Ctrl-Shift-C).
+
+Snapshots live in memory only and nothing is written to the file. See
+`docs/CHANGE-TRACKING.md` for the guide, and `change-tracking.md` next to this
+file for a page made for editing.
 
 [^1]: This is a footnote. The marker above is a superscript number; this
     definition is collected here at the foot of the document.

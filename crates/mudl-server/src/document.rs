@@ -55,6 +55,20 @@ pub struct DocumentConfig {
     /// leaves it out of what gets written to the preferences file, so it
     /// resets to `false` every time a document is (re)opened.
     pub allow_remote_images: bool,
+    /// Change tracking's master switch (`changes_enabled`): when `false`,
+    /// `server.rs` keeps the tracker up to date but renders no change
+    /// markup (`_working/DIFF-IMPLEMENTATION.md` §11.1).
+    pub changes_enabled: bool,
+    /// `changes_show_inline_deletions`: deleted words (`<del>`) inside
+    /// inserted blocks.
+    pub show_inline_deletions: bool,
+    /// `changes_auto_expand_groups`: the `is-auto-expand-changes` root
+    /// class, which `mud-changes.js` reads to start deletion/mixed groups
+    /// expanded.
+    pub auto_expand_changes: bool,
+    /// `changes_word_diff_threshold` as a percentage (25 = 0.25), the form
+    /// `mudl_core::changes::Waypoint` carries.
+    pub word_diff_threshold_pct: u8,
 }
 
 impl Default for DocumentConfig {
@@ -68,6 +82,10 @@ impl Default for DocumentConfig {
             wrap_lines: true,
             readable_column: false,
             allow_remote_images: false,
+            changes_enabled: true,
+            show_inline_deletions: false,
+            auto_expand_changes: false,
+            word_diff_threshold_pct: 25,
         }
     }
 }
@@ -175,6 +193,9 @@ fn html_classes(config: &DocumentConfig) -> Vec<String> {
     }
     if config.readable_column {
         classes.push("is-readable-column".to_string());
+    }
+    if config.auto_expand_changes {
+        classes.push("is-auto-expand-changes".to_string());
     }
     classes
 }
@@ -453,5 +474,16 @@ mod tests {
         let (html, _) = render("hi", base_dir(), "notes.md", Mode::Down, 0, &config, "tok");
         let classes = html_root_class_attr(&html);
         assert_eq!(classes, "is-readable-column");
+    }
+
+    #[test]
+    fn auto_expand_changes_adds_root_class() {
+        let config = DocumentConfig {
+            auto_expand_changes: true,
+            ..DocumentConfig::default()
+        };
+        let (html, _) = render("hi", base_dir(), "notes.md", Mode::Up, 0, &config, "tok");
+        let classes = html_root_class_attr(&html);
+        assert!(classes.split(' ').any(|c| c == "is-auto-expand-changes"));
     }
 }
