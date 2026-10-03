@@ -5,8 +5,8 @@ mudl marks what changed in a document since a point in time (a *waypoint*):
 when the file is edited while it's open, the next reload shows the changes.
 This page is something to edit while it's open, so you can watch that happen.
 
-The Changes bar and its navigation arrive with the GUI wiring; until then the
-server has to render against a waypoint for any of this to appear.
+The Changes bar, the Changes sidebar pane and the "Changes since…" popover
+are covered in the user guide, [`../CHANGE-TRACKING.md`](../CHANGE-TRACKING.md).
 
 
 ## What to try

@@ -20,7 +20,7 @@ Current status:
 | 3 | Script execution from document content | critical | **Fixed** |
 | 4 | Remote images load unconditionally | low | **Fixed** |
 | 5 | Link clicks hand arbitrary local files to `xdg-open` | medium | **Fixed** |
-| 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal) |
+| 6 | "Changes since…" runs `git` in an untrusted repo | medium | **Fixed** (by removal; feature rebuilt without git) |
 | 7 | Atomic writes drop permissions and follow symlinks | low-medium | **Fixed** |
 | 8 | Smaller items | — | All fixed |
 
@@ -341,6 +341,37 @@ overlay, and the `mudl-diff` crate it depended on) has been removed
 entirely, so there's no longer any code path that shells out to `git`
 inside the document's directory.
 
+**Change tracking re-introduced without git** (2026-10-02, commits
+`6fd499c`…`6a19e3d`; design in `_working/DIFF-IMPLEMENTATION.md`). A
+live "Changes" feature is back — `mudl-diff`, the Changes bar, the
+Changes sidebar pane, the "Changes since…" popover — but it is built on
+a different source of old content and does not reopen this finding:
+
+- **In-memory snapshots only.** The baseline is the content the tab read
+  when the document was opened; later snapshots ("waypoints") are the
+  content the server already reads to render each request. All of it
+  lives in the tab's `DocumentSource` (`crates/mudl-server/src/server.rs`)
+  and is dropped when the tab closes. Nothing is persisted.
+- **No git, no subprocess, no new file reads.** There is no VCS
+  integration and no `Command::new` anywhere in the feature; the three
+  `Command::new` sites listed in §9 are unchanged. The tracker never
+  touches the filesystem — it only sees strings handed to it.
+- **One new route flag.** The only new HTTP surface is the `export`
+  query flag on `/` (`?export=1`, used by Open In Browser), which renders
+  *without* change markup and bypasses the tracker. There is no
+  `?waypoint=N` route; waypoint selection is an in-process GUI call.
+- **Same sanitizer for old content.** Deleted (old) blocks are rendered
+  by the same renderer as the current content (`render_deletion` in
+  `crates/mudl-core/src/render.rs`), raw HTML included going through
+  `sanitize_html`; word-diff and code-line text is HTML-escaped. An old
+  version of a document can't carry anything the current one couldn't.
+- **Host-side JavaScript stays escaped.** Change group IDs passed to
+  `Mud.scrollToChange` go through `js_string_literal`
+  (`crates/mudl-gui/src/changes.rs`), like outline slugs and comment
+  labels.
+
+Finding 6 remains **fixed**.
+
 
 ## 7. Atomic writes drop permissions and follow symlinks
 
@@ -482,10 +513,10 @@ against `e88708e`:
   (`crates/mudl-server/src/assets.rs`), so `/assets/` has no traversal
   surface.
 - **Host-side JavaScript is escaped.** Every `evaluate_javascript` call
-  that embeds document-derived data (outline slugs and comment labels —
-  the change group IDs went with Finding 6) routes it through
-  `mudl_core::template::js_string_literal` first
-  (`crates/mudl-gui/src/sidebar.rs`). Find-in-page uses WebKit's native
+  that embeds document-derived data (outline slugs, comment labels, and
+  — since change tracking returned without git — change group IDs) routes
+  it through `mudl_core::template::js_string_literal` first
+  (`crates/mudl-gui/src/sidebar.rs`, `crates/mudl-gui/src/changes.rs`). Find-in-page uses WebKit's native
   `FindController` and interpolates nothing.
 - **Comment labels are constrained** to `[A-Za-z0-9_-]`
   (`crates/mudl-comments/src/labels.rs`) *and* HTML-escaped at every

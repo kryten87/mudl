@@ -833,86 +833,78 @@ toggles, and a CLI rendering tool — functionally at parity with `mud`'s
 core viewing experience.
 
 
-## 19. Phase 13 — Change tracking (deferred, git-integrated diff overlay)
+## 19. Phase 13 — Change tracking (in-memory waypoints)
 
-Only start this phase once Phases 0–12 are done and stable. It adds a new
-`mudl-diff` crate; nothing above needs to change to support it, because the
-core render functions already take a `RenderOptions` struct that can grow a
-`waypoint: Option<Waypoint>` field without breaking existing callers.
+> Status: **built** (commits `6fd499c`…`6a19e3d`). The detailed design is
+> `_working/DIFF-IMPLEMENTATION.md`; the user guide is
+> `docs/CHANGE-TRACKING.md`. This section summarizes what landed.
 
-13.1 **[P]** `mudl_diff::word::tokenize(text: &str) -> Vec<String>` and
-    `extract_words(tokens: &[String]) -> Vec<WordPart>` — pure tokenization
-    into alternating word/whitespace tokens. Tests: empty string,
-    whitespace-only, single word, leading/trailing whitespace preserved as
-    its own token, punctuation-adjacent words.
+History: a first version of this phase (`6efc831`…`52ab25c`) diffed only
+against git commits and was removed in `e88708e` because it ran `git`
+inside the document's directory (`docs/SECURITY.md`, finding 6). The
+rebuild follows what `mud` actually centers on — a snapshot taken when the
+document is opened — and needs no git, no subprocess, and no new file
+reads. As planned, nothing in Phases 0–12 changed shape: the render
+functions gained a `RenderOptions.waypoint: Option<Waypoint>` field and an
+additive branch on it.
 
-13.2 **[S, depends on 13.1]** `mudl_diff::word::diff(old: &[WordPart], new:
-    &[WordPart]) -> Vec<WordSpan>` (an LCS-based diff — Rust's standard
-    library has no built-in `CollectionDifference` equivalent; implement a
-    small, pure Myers-diff or classic DP-based LCS over the token slices —
-    this is squarely in "standard, well-known algorithm, hand-roll it"
-    territory, not a dependency exception) plus `similarity(spans: &[WordSpan])
-    -> f64` and `has_significant_changes(spans: &[WordSpan], threshold: f64)
-    -> bool`. Tests ported directly from `mud`'s `WordDiffTests`: identical
-    input → no changes; whitespace-only diff; hard-break preservation
-    (trailing 2+ spaces vs. backslash); leading indent kept as its own
-    span; a moved word doesn't duplicate trailing whitespace; similarity
-    exactly at the 0.25 threshold boundary (inclusive/exclusive — pick one
-    and test it explicitly, matching `mud`'s documented behavior).
+13.1 **[P]** `mudl-diff` crate, dependency-free, ported from `mud`'s
+    `Core/Sources/Diff`: `myers` (O((N+M)·D) sequence diff — the old
+    O(n·m) LCS table was too large for long documents), `word` (word
+    spans, `similarity`, `has_significant_changes` with an inclusive 0.25
+    default threshold), `pairing` (deterministic greedy best-overlap
+    pairing), `line`, `block` (whitespace-normalized fingerprints that
+    ignore re-wrapping, list renumbering, table padding and comment
+    references; `match_blocks`), `code` (per-line diff of paired code
+    blocks, Mermaid/math excluded), `plan` (`ChangePlan`: `change-N` /
+    `group-N` IDs, plus an 8-entry `PlanCache`), and `list` (the sidebar's
+    `ChangeGroup` projection). Tests ported from `WordDiffTests`,
+    `BlockMatcherTests`, `ChangePlanParityTests`, `ChangeIDParityTests`.
 
-13.3 **[P]** `mudl_diff::pairing::best_pairs(deleted: &[&str], inserted:
-    &[&str]) -> Vec<(usize, usize)>` — greedy maximum-weight matching by
-    shared-word-set intersection count (not LCS) between deleted/inserted
-    line groups within a gap. Tests: 0/1/N lines on each side, a tie in
-    score (deterministic tie-break rule — decide and test one), empty line
-    text on either side.
+13.2 **[S, depends on 13.1]** `mudl_core::changes`: leaf-block collection
+    from the `pulldown-cmark` event stream (paragraphs, headings, code
+    blocks, list items, table rows; frontmatter and comment definitions
+    skipped) and `ChangeTracker` — the initial snapshot, minute-coalesced
+    reload waypoints (at most 10), a single Accept waypoint, an explicit
+    active-waypoint choice, redundant-save dedup (an edit that leaves every
+    fingerprint unchanged, such as adding a comment, is not stored), the
+    "Changes since…" menu items, and a cached change list per mode.
 
-13.4 **[S, depends on 13.1]** `mudl_diff::line::diff(old: &[&str], new:
-    &[&str]) -> Option<Vec<LineChange>>` — line-level LCS diff, `None` when
-    identical. Tests: identical arrays → `None`, all-deleted, all-inserted,
-    interleaved changes.
+13.3 **[S, depends on 13.2]** Change markup in `render_up`/`render_down`.
+    Up mode puts `data-change-*` attributes and `mud-change-*` classes on
+    the native elements (not `<ins>`/`<del>` wrappers, which are invalid
+    inside lists and tables), places deleted blocks inline, and adds
+    word-level `<ins>`/`<del>` spans and code-block line diffs. Down mode
+    adds inserted/deleted line rows (deleted source lines restored) and
+    word markers. Golden parity corpus in
+    `crates/mudl-core/tests/change_corpus.rs`.
 
-13.5 **[S, depends on 13.2–13.4]** `mudl_diff::block::fingerprint(block:
-    &LeafBlock) -> String` (whitespace-normalized prose fingerprint, with
-    first-line indent and hard breaks preserved, comment-footnote
-    references stripped) and `mudl_diff::block::match_blocks(old: &[LeafBlock],
-    new: &[LeafBlock]) -> Vec<BlockMatch>`. Tests ported from
-    `BlockMatcherTests`: re-wrapped paragraph is not a change, table
-    pipe-padding differences are not a change, blockquote continuation
-    prefix differences are not a change, ordered-list renumbering (5. → 4.)
-    is not a change, an actually-different paragraph is a change.
+13.4 **[S, depends on 13.3]** `resources/js/mud-changes.js` and
+    `resources/css/mud-changes.css`, ported: overlays, numbered expandos,
+    `Mud.scrollToChange`, unfolding folded headings, print hiding. Loaded
+    only when a page carries change markup.
 
-13.6 **[S, depends on 13.5]** `mudl_diff::plan::ChangePlan::build(matches:
-    &[BlockMatch]) -> ChangePlan` — sequential `change-N` ID minting, gap
-    grouping into `group-N` badge IDs, code-block positional pairing
-    excluding Mermaid/math blocks. Memoize with a small fixed-size LRU
-    keyed by `(old_hash, new_hash, threshold, definition_policy)` (a
-    `HashMap` + manual eviction is enough — no `lru` crate needed for an
-    8-entry cache). Tests ported from `ChangePlanParityTests`/
-    `ChangeIDParityTests`: ID stability across repeated calls with the same
-    inputs, correct grouping of adjacent changes, code blocks paired
-    positionally and excluded when they're Mermaid/math.
+13.5 **[S, depends on 13.2–13.4]** Server wiring: each tab's
+    `DocumentSource` owns a `Mutex<ChangeTracker>`, seeded from the content
+    read at tab open; `serve_document` is the single point content enters
+    it. `?export=1` (Open In Browser) renders without change markup and
+    bypasses the tracker; the CLI never renders it, and
+    `mud-print.css` hides it from Print.
 
-13.7 **[P]** `mudl_diff::git::GitRunner` trait (`fn run(&self, args: &[&str],
-    cwd: &Path) -> io::Result<(i32, String)>`) with a real
-    `std::process::Command`-backed implementation and a scripted fake for
-    tests — mirrors `mud`'s existing DI pattern for `GitProvider`. Pure
-    parsing of `git log`/`git show` output into waypoint candidates is
-    extracted and tested separately from the process-spawning shell.
+13.6 **[P, depends on 13.5]** GTK: the floating Changes bar (badge,
+    "N changes since …" status button, Previous/Next, Accept), the
+    "Changes since…" popover, a runtime Outline / Changes / Comments
+    sidebar switcher with a Changes pane, View > Show Changes
+    (Ctrl-Shift-C), Next/Previous Change (Ctrl-. / Ctrl-,), Edit > Accept
+    Changes, and the `changes_*` preferences (Appendix B).
 
-13.8 **[S, depends on 13.6, mudl-core render functions]** Wire `ChangePlan`
-    into `render_up`/`render_down` as an optional overlay
-    (`RenderOptions.waypoint`), injecting `<ins>`/`<del>` markers and change/
-    group badge attributes into the existing HTML output. This is the one
-    step that touches Phase 2's rendering code again — by design, it's an
-    additive branch (`if let Some(waypoint) = &options.waypoint { ... }`),
-    not a rewrite, confirming the earlier architecture choice to keep
-    `RenderOptions` extensible paid off.
-
-13.9 **[P]** Extend the GTK sidebar (Phase 10.3) with a "Changes" pane
-    (mirrors `mud`'s `ChangesSidebarView`) listing `ChangeGroup`s, and a
-    "Changes since…" popover for picking a waypoint or a `GitRunner`-sourced
-    commit to diff against.
+**Not built: git waypoints.** The old plan's step 13.7 (a `GitRunner`
+trait and `git log`/`git show` waypoints, `mud`'s "Since last staged" and
+"Recent commits") is deliberately left out: running `git` in a document's
+directory is exactly what finding 6 removed, since that directory may be an
+untrusted repository whose config can execute commands. If it is ever
+wanted, it should re-enter through `ChangeTracker`'s waypoint list behind a
+fresh security review.
 
 
 ## 20. Phase 14 — Comments (deferred, footnote-based)
@@ -1010,18 +1002,14 @@ control the menu bar drives already exists as a function call or a widget
 signal — the menu bar mostly just gives those existing code paths a second
 entry point.
 
-Three items are explicitly out of scope for this phase, shipped as visible
-but disabled (`set_sensitive(false)`) menu entries rather than omitted, so
-the menu's shape still matches `docs/MENUS.md`:
+Two items were out of scope for this phase, shipped as visible but
+disabled (`set_sensitive(false)`) menu entries rather than omitted, so the
+menu's shape still matches `docs/MENUS.md`:
 
-- **View > Show Comments** and **Edit > Add Comment** (they share the
-  Ctrl-Shift-K accelerator) — both need the sidebar's pane
-  (Outline/Changes/Comments — Appendix B's `sidebarPane`, today fixed
-  per-tab at open time) to become switchable at runtime, which is a
-  separate follow-up.
-- **View > Hide Changes** — needs a new CSS class to hide the `<ins>`/
-  `<del>` waypoint-diff overlay independently of clearing the waypoint
-  (Phase 13.8's overlay); deferred.
+- **Edit > Add Comment** (shares Ctrl-Shift-K with View > Show Comments)
+  — still disabled. **View > Show Comments** was in this list too; it
+  became possible once change tracking (Phase 13.6) made the sidebar's
+  pane switchable at runtime, and now switches to the Comments pane.
 - **Edit > Undo/Redo** — the only editable widget in the app is the
   Phase 14.7 comments compose `TextView`, and GTK3's `TextView` has no
   built-in undo/redo (a GTK4 feature); hand-rolling a stack is deferred.
@@ -1103,8 +1091,11 @@ the menu's shape still matches `docs/MENUS.md`:
     Hide Sidebar (toggles the current tab's sidebar `ScrolledWindow`
     visibility and `Preferences.sidebar_enabled` — an existing field
     nothing has read until now; `build_tab` starts a new tab's sidebar
-    from it). Show Comments, Add Comment, Hide Changes, Undo, Redo are
-    built `set_sensitive(false)` per the phase intro.
+    from it). Show Comments, Add Comment, Hide Changes, Undo, Redo were
+    built `set_sensitive(false)` per the phase intro. (Since then, Phase
+    13's rebuild replaced the disabled Hide Changes item with a working
+    View > Show Changes checkmark (Ctrl-Shift-C) plus Next/Previous Change
+    and Edit > Accept Changes, and enabled Show Comments.)
 
 15.6 **[S, depends on 15.5]** Wire accelerators via a `gtk::AccelGroup`
     added to the window, one `add_accelerator("activate", ...)` per
@@ -1168,7 +1159,7 @@ Phase 10.4's toolbar controls existing to drive.
 | `upModeAllowRemoteContent` | bool | `true` | Same (`RenderOptions.block_remote_content`). |
 | `downModeShowLineNumbers` | bool (ViewToggle) | `true` | Same, CSS body-class toggle. |
 | `downModeWrapLines` | bool (ViewToggle) | `true` | Same. |
-| `sidebarEnabled` / `sidebarPane` | bool / enum outline\|changes | `false` / `outline` | Same (`changes` inert until Phase 13). |
+| `sidebarEnabled` / `sidebarPane` | bool / enum outline\|changes\|comments | `false` / `outline` | Same (`sidebar_enabled` / `sidebar_pane`); the pane is also switchable at runtime. |
 | `markdownDocCAlertMode` | enum off/common/extended | `extended` | Same. |
 | `uiUseHeadingAsTitle` | bool | `true` | Same. |
 | `uiShowReadableColumn` | bool (ViewToggle) | `false` | Same. |
@@ -1177,7 +1168,12 @@ Phase 10.4's toolbar controls existing to drive.
 | `enabledExtensions` | set of strings | all (`mermaid`, `copy-code`) | Same registry concept. |
 | `openInDefaultBundleID` / `openInDefaultFormat` | macOS LaunchServices | — | Replaced by a plain configured command string (e.g. `$EDITOR`) or `xdg-open`; no app-registry lookup needed. |
 | `uiFloatingControlsPosition` | enum | `bottomCenter` | Same, if a floating find bar is used (10.5) — otherwise drop if `WebKitFindController`'s own UI is used instead. |
-| `changes*` / `comment*` keys | various | various | Deferred to Phases 13–14, added to the preferences schema at that point (7.3's "unknown keys ignored" rule means adding them later is backward compatible). |
+| `changes-enabled` | bool | `true` | Same (`changes_enabled`); also written by View > Show Changes. |
+| `changes-show-inline-deletions` | bool | `false` | Same (`changes_show_inline_deletions`). |
+| `changes-auto-expand-groups` | bool | `false` | Same (`changes_auto_expand_groups`). |
+| `changes-word-diff-threshold` | f64 0.0–1.0 | `0.25` | Same (`changes_word_diff_threshold`); out of range falls back to the default. |
+| `changes-show-git-waypoints` | bool | `false` | Dropped — no git waypoints (Phase 13, `docs/SECURITY.md` finding 6). |
+| `comment*` keys | various | various | Deferred, added to the preferences schema when needed (7.3's "unknown keys ignored" rule means adding them later is backward compatible). |
 
 Keys with no Linux equivalent, dropped: `cliInstalled`/`cliSymlinkPath`/
 `cliInstalledAt` (replaced by Phase 11's simpler installer, which can just

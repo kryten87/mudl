@@ -885,6 +885,29 @@ mod respond_to_tests {
         assert_eq!(document.tracker().waypoints().len(), 2);
     }
 
+    /// A comment write (`mudl_comments::write::add_comment`) is a self-write
+    /// that reaches the server through the normal reload. Comments are
+    /// invisible to the change fingerprints, so it must be absorbed as a
+    /// redundant save in both modes: no new waypoint, no change markup.
+    #[test]
+    fn comment_add_creates_no_waypoint_and_no_change_markup() {
+        const COMMENTED: &str = "# Title\n\nFirst paragraph.[^comment-a]\n\n\
+             [^comment-a]:\n    > First paragraph.\n\n    A note.\n";
+        let version = VersionCounter::new();
+        let (filesystem, document, clock) = tracked(ORIGINAL);
+        clock.advance(Duration::from_secs(120));
+        filesystem.insert("/docs/notes.md", COMMENTED.as_bytes().to_vec());
+
+        for query in [&[][..], &[("mode", "down")][..]] {
+            let response = respond_to(&query_req(query), &version, &filesystem, &document);
+            let text = body_of(&response);
+            assert!(!text.contains("data-change-id=\""), "{text}");
+            assert!(!text.contains("/assets/mud-changes.js"), "{text}");
+            assert!(document.change_groups().is_empty());
+        }
+        assert_eq!(document.tracker().waypoints().len(), 1);
+    }
+
     #[test]
     fn export_renders_no_change_markup_and_leaves_the_tracker_alone() {
         let version = VersionCounter::new();

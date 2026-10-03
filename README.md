@@ -5,8 +5,8 @@ mudl: A Perfect Markdown Viewer (for Linux)
 macOS-only Markdown viewer. `mudl` reimplements `mud`'s core viewing
 experience for Ubuntu 22.04+: GitHub-flavored Markdown rendering, an
 instant raw-source view, auto-reload on save, folder/outline sidebars,
-themes, dark mode, zoom/word-wrap/readable-column toggles, find, and a
-CLI rendering tool — see `docs/IMPLEMENTATION-PLAN.md` for the full build
+themes, dark mode, zoom/word-wrap/readable-column toggles, find, live
+change tracking, and a CLI rendering tool — see `docs/IMPLEMENTATION-PLAN.md` for the full build
 plan and scope decisions.
 
 `mudl` shows you both sides of the document:
@@ -25,6 +25,10 @@ Hit Space to flip between them. Your scroll position carries over.
 - Syntax-highlighted code blocks, Mermaid diagrams, and math expressions
   (all rendered client-side, no network requests)
 - Auto-reload every time the file is saved to disk
+- Change tracking: see what changed since the document was opened, down to
+  the word, with a Changes bar, a Changes sidebar pane, and earlier
+  in-memory snapshots to compare against — no git required
+  ([guide](docs/CHANGE-TRACKING.md))
 - Table of contents — document outliner in the sidebar
 - Open a folder to get a tree of every Markdown document inside it
 - Five color themes — Austere, Blues, Earthy, Riot, and System — with
@@ -100,6 +104,8 @@ Run `mudl --help` for the full flag list.
   step-by-step build plan, architecture, and scope decisions
 - [`docs/PACKAGING.md`](docs/PACKAGING.md) — distribution format and how
   to build a `.deb`
+- [`docs/CHANGE-TRACKING.md`](docs/CHANGE-TRACKING.md) — user guide to
+  change tracking: the Changes bar, waypoints, shortcuts, and preferences
 - [`docs/examples/`](docs/examples/) — feature-showcase Markdown documents
   used as manual test fixtures and demo content
 

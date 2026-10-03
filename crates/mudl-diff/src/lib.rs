@@ -39,8 +39,8 @@ const COMMENT_LABEL_PREFIX: &str = "comment-";
 /// notion of a word character. It lives here, at the bottom of the
 /// dependency graph, because comments must be invisible to change tracking:
 /// the fingerprints in [`block`] strip comment references, and the leaf
-/// collector in `mudl-core` skips comment definitions. `mudl-core` will
-/// reuse this function instead of keeping its own copy.
+/// collector in `mudl-core` skips comment definitions. `mudl-core`
+/// re-exports it as `mudl_core::footnotes::is_comment_label`.
 pub fn is_comment_label(label: &str) -> bool {
     match label.strip_prefix(COMMENT_LABEL_PREFIX) {
         Some(suffix) if !suffix.is_empty() => suffix.chars().all(is_label_char),
