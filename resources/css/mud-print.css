@@ -81,6 +81,32 @@
   #mud-comments-column { display: none; }
 
 
+  /* Change tracking (mud-changes.css, live view only): print the current
+     document as it stands, the way an export shows it. Overlays and badges are
+     on-screen controls; deletions stay hidden even when expanded on screen,
+     along with the wrappers that hold nothing else; insertions lose their
+     tints. */
+  .mud-overlay,
+  .mud-expando { display: none !important; }
+
+  .mud-change-del,
+  .cl.cl-del,
+  .line.dl-del,
+  [data-change-id] del,
+  .up-mode-output table:not(:has(tr:not(.mud-change-del))),
+  .up-mode-output :is(ul, ol):not(:has(> li:not(.mud-change-del))) {
+    display: none !important;
+  }
+
+  [data-change-id] ins { background: none; }
+  .cl.cl-ins { background: none; }
+  .line.dl-ins::after { content: none; }
+  .line.dl-ins::before {
+    color: color-mix(in srgb, var(--blockquote-color), var(--bg-color));
+    background: none;
+  }
+
+
   /* Down mode: don't clip code blocks. */
   .dc-scroll { overflow-x: visible; }
 

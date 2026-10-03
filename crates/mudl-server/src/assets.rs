@@ -38,6 +38,7 @@ mod lookup_tests {
             lookup("theme-earthy.css"),
             Some(resources::THEME_EARTHY_CSS)
         );
+        assert_eq!(lookup("mud-changes.css"), Some(resources::MUD_CHANGES_CSS));
     }
 
     #[test]
@@ -48,6 +49,7 @@ mod lookup_tests {
         assert_eq!(lookup("mud.js"), Some(resources::MUD_JS));
         assert_eq!(lookup("mud-up.js"), Some(resources::MUD_UP_JS));
         assert_eq!(lookup("mud-down.js"), Some(resources::MUD_DOWN_JS));
+        assert_eq!(lookup("mud-changes.js"), Some(resources::MUD_CHANGES_JS));
         assert_eq!(
             lookup("highlight-init.js"),
             Some(resources::HIGHLIGHT_INIT_JS)
