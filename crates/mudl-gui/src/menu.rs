@@ -16,9 +16,11 @@
 //! correct at the moment it's opened, and GTK's `set_active` is a no-op
 //! when the value isn't actually changing, so this can't loop.
 //!
-//! Show Comments, Add Comment, Undo, and Redo are built disabled
+//! Add Comment, Undo, and Redo are built disabled
 //! (`set_sensitive(false)`) — see the Phase 15 intro in
-//! `docs/IMPLEMENTATION-PLAN.md` for why each is deferred.
+//! `docs/IMPLEMENTATION-PLAN.md` for why each is deferred. Show Comments
+//! became possible with the runtime sidebar pane switcher (change tracking
+//! Phase 5): it switches the current tab's sidebar to the Comments pane.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -233,7 +235,7 @@ fn connect_open_in_browser(item: &gtk::MenuItem, ctx: &Context) {
     let notebook = ctx.notebook.clone();
     item.connect_activate(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
-            let url = toolbar::document_url(tab.toolbar_ctx.addr, tab.toolbar_ctx.mode.get());
+            let url = toolbar::export_url(tab.toolbar_ctx.addr, tab.toolbar_ctx.mode.get());
             let _ =
                 gtk::gio::AppInfo::launch_default_for_uri(&url, gtk::gio::AppLaunchContext::NONE);
         });
@@ -359,6 +361,10 @@ fn build_edit_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
     );
     add_comment.set_sensitive(false);
     menu.append(&add_comment);
+
+    let accept_changes = gtk::MenuItem::with_label("Accept Changes");
+    connect_current_changes(&accept_changes, ctx, |changes| changes.accept());
+    menu.append(&accept_changes);
 
     menu.append(&gtk::SeparatorMenuItem::new());
 
@@ -489,7 +495,6 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
     connect_hide_sidebar(&hide_sidebar, ctx);
     menu.append(&hide_sidebar);
 
-    // Deferred (Phase 15 intro): needs runtime sidebar-pane switching.
     let show_comments = gtk::CheckMenuItem::with_label("Show Comments");
     add_accel(
         &show_comments,
@@ -497,8 +502,32 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
         key::k,
         Mod::CONTROL_MASK | Mod::SHIFT_MASK,
     );
-    show_comments.set_sensitive(false);
+    connect_show_comments(&show_comments, ctx);
     menu.append(&show_comments);
+
+    menu.append(&gtk::SeparatorMenuItem::new());
+
+    let show_changes = gtk::CheckMenuItem::with_label("Show Changes");
+    add_accel(
+        &show_changes,
+        accel_group,
+        key::c,
+        Mod::CONTROL_MASK | Mod::SHIFT_MASK,
+    );
+    connect_show_changes(&show_changes, ctx);
+    menu.append(&show_changes);
+
+    // mudl additions (`mud` has no shortcut for these): the Changes bar's
+    // own Next / Previous buttons.
+    let next_change = gtk::MenuItem::with_label("Next Change");
+    add_accel(&next_change, accel_group, key::period, Mod::CONTROL_MASK);
+    connect_current_changes(&next_change, ctx, |changes| changes.next());
+    menu.append(&next_change);
+
+    let previous_change = gtk::MenuItem::with_label("Previous Change");
+    add_accel(&previous_change, accel_group, key::comma, Mod::CONTROL_MASK);
+    connect_current_changes(&previous_change, ctx, |changes| changes.previous());
+    menu.append(&previous_change);
 
     menu.append(&gtk::SeparatorMenuItem::new());
 
@@ -563,6 +592,8 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
         ctx,
         ViewMenuCheckables {
             hide_sidebar,
+            show_comments,
+            show_changes,
             mark_up,
             mark_down,
             readable_column,
@@ -583,6 +614,8 @@ fn build_view_menu(ctx: &Context, accel_group: &gtk::AccelGroup) -> gtk::MenuIte
 /// too-many-arguments threshold.
 struct ViewMenuCheckables {
     hide_sidebar: gtk::CheckMenuItem,
+    show_comments: gtk::CheckMenuItem,
+    show_changes: gtk::CheckMenuItem,
     mark_up: gtk::RadioMenuItem,
     mark_down: gtk::RadioMenuItem,
     readable_column: gtk::CheckMenuItem,
@@ -599,6 +632,8 @@ fn connect_view_menu_show(menu: &gtk::Menu, ctx: &Context, checkables: ViewMenuC
     let notebook = ctx.notebook.clone();
     let ViewMenuCheckables {
         hide_sidebar,
+        show_comments,
+        show_changes,
         mark_up,
         mark_down,
         readable_column,
@@ -608,7 +643,8 @@ fn connect_view_menu_show(menu: &gtk::Menu, ctx: &Context, checkables: ViewMenuC
     } = checkables;
     menu.connect_show(move |_| {
         with_current_tab(&tabs, &notebook, |tab| {
-            hide_sidebar.set_active(!tab.sidebar_scroller.is_visible());
+            hide_sidebar.set_active(!tab.sidebar.is_visible());
+            show_comments.set_active(is_showing_comments(tab));
             let mode = tab.toolbar_ctx.mode.get();
             // Read every flag into a local first, all in one block: each
             // `set_active` below can synchronously fire its own toggled
@@ -617,14 +653,16 @@ fn connect_view_menu_show(menu: &gtk::Menu, ctx: &Context, checkables: ViewMenuC
             // (Rust extends a temporary's lifetime to the end of its
             // statement) would panic with a `BorrowMutError` on this same
             // `RefCell`.
-            let (readable_column_active, line_numbers_active, word_wrap_active) = {
+            let (readable_column_active, line_numbers_active, word_wrap_active, changes_active) = {
                 let prefs = tab.toolbar_ctx.prefs.borrow();
                 (
                     prefs.ui_show_readable_column,
                     prefs.down_mode_show_line_numbers,
                     prefs.down_mode_wrap_lines,
+                    prefs.changes_enabled,
                 )
             };
+            show_changes.set_active(changes_active);
             readable_column.set_active(readable_column_active);
             line_numbers.set_active(line_numbers_active);
             word_wrap.set_active(word_wrap_active);
@@ -645,10 +683,87 @@ fn connect_hide_sidebar(check: &gtk::CheckMenuItem, ctx: &Context) {
     check.connect_toggled(move |check| {
         let hidden = check.is_active();
         with_current_tab(&tabs, &notebook, |tab| {
-            tab.sidebar_scroller.set_visible(!hidden);
+            tab.sidebar.set_visible(!hidden);
         });
         prefs.borrow_mut().sidebar_enabled = !hidden;
         let _ = mudl_config::save(&mudl_config::RealFileSystem, &prefs_path, &prefs.borrow());
+    });
+}
+
+/// Whether the current tab shows its Comments pane (sidebar visible, on
+/// the Comments page) — the Show Comments checkmark.
+fn is_showing_comments(tab: &TabHandle) -> bool {
+    tab.sidebar.is_visible()
+        && tab.sidebar_stack.visible_child_name().as_deref()
+            == Some(mudl_config::SidebarPane::Comments.as_str())
+}
+
+/// View > Show Comments: checking it reveals the sidebar on its Comments
+/// pane; unchecking it returns a sidebar showing Comments to the Outline.
+/// (The resync in `connect_view_menu_show` can fire this with the state
+/// already matching; both branches are then no-ops.)
+fn connect_show_comments(check: &gtk::CheckMenuItem, ctx: &Context) {
+    let tabs = Rc::clone(&ctx.tabs);
+    let notebook = ctx.notebook.clone();
+    let prefs = Rc::clone(&ctx.prefs);
+    let prefs_path = ctx.prefs_path.clone();
+    check.connect_toggled(move |check| {
+        let active = check.is_active();
+        let revealed = with_current_tab(&tabs, &notebook, |tab| {
+            let comments = mudl_config::SidebarPane::Comments.as_str();
+            if active {
+                let was_hidden = !tab.sidebar.is_visible();
+                tab.sidebar.set_visible(true);
+                tab.sidebar_stack.set_visible_child_name(comments);
+                was_hidden
+            } else {
+                if tab.sidebar_stack.visible_child_name().as_deref() == Some(comments) {
+                    tab.sidebar_stack
+                        .set_visible_child_name(mudl_config::SidebarPane::Outline.as_str());
+                }
+                false
+            }
+        });
+        if revealed == Some(true) {
+            prefs.borrow_mut().sidebar_enabled = true;
+            let _ = mudl_config::save(&mudl_config::RealFileSystem, &prefs_path, &prefs.borrow());
+        }
+    });
+}
+
+/// View > Show Changes: flips `changes_enabled` (persisted) and reloads
+/// the current tab with or without change markup; other tabs catch up
+/// when they next become current (`changes::Changes::refresh`).
+fn connect_show_changes(check: &gtk::CheckMenuItem, ctx: &Context) {
+    let tabs = Rc::clone(&ctx.tabs);
+    let notebook = ctx.notebook.clone();
+    let prefs = Rc::clone(&ctx.prefs);
+    check.connect_toggled(move |check| {
+        let active = check.is_active();
+        // Read into a local first: `set_enabled` borrows mutably.
+        let current = prefs.borrow().changes_enabled;
+        if active == current {
+            return;
+        }
+        with_current_tab(&tabs, &notebook, |tab| tab.changes.set_enabled(active));
+    });
+}
+
+/// Runs `f` on the current tab's Changes UI (Accept / Next / Previous).
+fn connect_current_changes(
+    item: &gtk::MenuItem,
+    ctx: &Context,
+    f: impl Fn(&crate::changes::Changes) + 'static,
+) {
+    let tabs = Rc::clone(&ctx.tabs);
+    let notebook = ctx.notebook.clone();
+    item.connect_activate(move |_| {
+        // Clone the handle out so `f` (which may reload the page) runs with
+        // no `tabs` borrow held.
+        let changes = with_current_tab(&tabs, &notebook, |tab| Rc::clone(&tab.changes));
+        if let Some(changes) = changes {
+            f(&changes);
+        }
     });
 }
 

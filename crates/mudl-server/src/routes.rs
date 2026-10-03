@@ -15,8 +15,13 @@ pub enum Mode {
 /// filesystem or socket access happens here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
-    /// `/` — the rendered document, in the given mode.
+    /// `/` — the rendered document, in the given mode, with change
+    /// tracking (the tracker sees the content; change markup when enabled).
     Document(Mode),
+    /// `/?export=1` — the rendered document for a context outside the app
+    /// (Open In Browser): never touches the change tracker and never
+    /// carries change markup (`_working/DIFF-IMPLEMENTATION.md` §11.1).
+    Export(Mode),
     /// `/assets/<name>` — a bundled, embedded static asset.
     Asset(String),
     /// `/local/<token>/<percent-encoded-path>` — a local file referenced by
@@ -39,7 +44,14 @@ pub enum Route {
 /// Maps a parsed [`Request`] to the [`Route`] it should be served by.
 pub fn dispatch(req: &Request) -> Route {
     match req.path.as_str() {
-        "/" => Route::Document(parse_mode(req.query.get("mode"))),
+        "/" => {
+            let mode = parse_mode(req.query.get("mode"));
+            if is_export(req.query.get("export")) {
+                Route::Export(mode)
+            } else {
+                Route::Document(mode)
+            }
+        }
         "/wait" => match parse_since(req.query.get("since")) {
             Some(since) => Route::WaitForChange(since),
             None => Route::NotFound,
@@ -80,6 +92,12 @@ fn parse_mode(raw: Option<&String>) -> Mode {
         Some("down") => Mode::Down,
         _ => Mode::Up,
     }
+}
+
+/// `?export=1` (or `true`) marks an export render; anything else,
+/// including absence, is an ordinary in-app render.
+fn is_export(raw: Option<&String>) -> bool {
+    matches!(raw.map(String::as_str), Some("1" | "true"))
 }
 
 /// `None` (missing param) defaults to `Some(0)`; a present-but-unparseable
@@ -148,6 +166,26 @@ mod tests {
     fn root_with_unrecognized_mode_is_document_up() {
         assert_eq!(
             dispatch(&req("/", &[("mode", "sideways")])),
+            Route::Document(Mode::Up)
+        );
+    }
+
+    #[test]
+    fn root_with_export_is_export_route() {
+        assert_eq!(
+            dispatch(&req("/", &[("export", "1")])),
+            Route::Export(Mode::Up)
+        );
+        assert_eq!(
+            dispatch(&req("/", &[("mode", "down"), ("export", "1")])),
+            Route::Export(Mode::Down)
+        );
+    }
+
+    #[test]
+    fn root_with_export_zero_is_an_ordinary_document() {
+        assert_eq!(
+            dispatch(&req("/", &[("export", "0")])),
             Route::Document(Mode::Up)
         );
     }

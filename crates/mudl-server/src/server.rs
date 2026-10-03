@@ -14,7 +14,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+use mudl_core::changes::{ChangeGroup, ChangeTracker, MenuItem, TrackerMode};
+use mudl_watch::{Clock, RealClock};
 
 use crate::assets;
 use crate::document::{self, DocumentConfig};
@@ -33,7 +36,6 @@ use crate::version::VersionCounter;
 /// not just the next server instance — so a request in flight and a GUI
 /// control updating the config from another thread both need safe
 /// concurrent access to the same `DocumentSource`.
-#[derive(Debug)]
 pub struct DocumentSource {
     pub path: PathBuf,
     pub config: Mutex<DocumentConfig>,
@@ -52,16 +54,114 @@ pub struct DocumentSource {
     /// With it, the only way to learn a valid token is to have already
     /// loaded `/` and read it out of that render's own `<img src>` values.
     local_token: String,
+    /// The tab's change-tracking history (`_working/DIFF-IMPLEMENTATION.md`
+    /// §4). `serve_document` is the only place content enters it; the GUI
+    /// reads it (and accepts / picks waypoints) through the accessors
+    /// below. The lock is held only for tracker bookkeeping, never while a
+    /// page renders.
+    tracker: Mutex<ChangeTracker>,
+    /// Where tracker timestamps come from — injected so tests stay
+    /// deterministic.
+    clock: Arc<dyn Clock>,
+}
+
+impl std::fmt::Debug for DocumentSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocumentSource")
+            .field("path", &self.path)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DocumentSource {
     pub fn new(path: PathBuf) -> Self {
+        Self::with_clock(path, Arc::new(RealClock))
+    }
+
+    /// [`DocumentSource::new`] with an explicit clock for tracker
+    /// timestamps.
+    pub fn with_clock(path: PathBuf, clock: Arc<dyn Clock>) -> Self {
         Self {
             path,
             config: Mutex::new(DocumentConfig::default()),
             allowed_local_paths: Mutex::new(HashSet::new()),
             local_token: random_token(),
+            tracker: Mutex::new(ChangeTracker::new()),
+            clock,
         }
+    }
+
+    /// The injected clock's current time.
+    pub fn now(&self) -> SystemTime {
+        self.clock.now()
+    }
+
+    /// A poisoned tracker is still a consistent tracker (every mutation
+    /// completes before anything can panic in it), so recover rather than
+    /// take the tab down.
+    fn tracker(&self) -> std::sync::MutexGuard<'_, ChangeTracker> {
+        self.tracker.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records the document as opened (the "since document opened"
+    /// baseline). A no-op once seeded.
+    pub fn seed_tracker(&self, markdown: &str) {
+        let now = self.now();
+        self.tracker().seed(Arc::from(markdown), now);
+    }
+
+    /// The current change groups (the Changes bar and sidebar rows),
+    /// cloned out of the lock.
+    pub fn change_groups(&self) -> Vec<ChangeGroup> {
+        self.tracker().groups()
+    }
+
+    /// When the waypoint the diff is drawn against was taken.
+    pub fn active_waypoint_time(&self) -> Option<SystemTime> {
+        self.tracker().active().map(|w| w.at)
+    }
+
+    /// Accepts the current content: the next render shows no changes.
+    pub fn accept_changes(&self) {
+        let now = self.now();
+        self.tracker().accept(now);
+    }
+
+    /// Makes waypoint `id` the diff reference (`None` = the default).
+    pub fn select_waypoint(&self, id: Option<u64>) {
+        self.tracker().select_waypoint(id);
+    }
+
+    /// The "Changes since…" rows, as of now.
+    pub fn change_menu_items(&self) -> Vec<MenuItem> {
+        let now = self.now();
+        self.tracker().menu_items(now)
+    }
+
+    /// Feeds a freshly read document to the tracker and returns the
+    /// waypoint the render should diff against (`None`: no markup).
+    fn track(
+        &self,
+        markdown: &str,
+        mode: routes::Mode,
+        config: &DocumentConfig,
+    ) -> Option<mudl_core::changes::Waypoint> {
+        let now = self.now();
+        let mut tracker = self.tracker();
+        // Mode first: a mode switch then recomputes against the content the
+        // tracker already has (usually a plan-cache hit), and `update`
+        // diffs the new content once, under the right policy.
+        tracker.set_mode(match mode {
+            routes::Mode::Up => TrackerMode::Up,
+            routes::Mode::Down => TrackerMode::Down,
+        });
+        tracker.update(Arc::from(markdown), now);
+        tracker.render_waypoint(
+            config.changes_enabled,
+            config.show_inline_deletions,
+            config.word_diff_threshold_pct,
+        )
     }
 
     /// The per-instance token every `/local/` request must present
@@ -301,7 +401,8 @@ fn respond_to(
 ) -> Vec<u8> {
     match routes::dispatch(req) {
         Route::Asset(name) => serve_asset(&name),
-        Route::Document(mode) => serve_document(mode, version, filesystem, document),
+        Route::Document(mode) => serve_document(mode, false, version, filesystem, document),
+        Route::Export(mode) => serve_document(mode, true, version, filesystem, document),
         Route::LocalFile { token, path } => serve_local_file(&token, &path, filesystem, document),
         Route::WaitForChange(since) => wait_for_change(since, version),
         Route::NotFound => not_found(),
@@ -315,8 +416,14 @@ fn respond_to(
 /// `crate::document::render`. A read error (file missing, permission
 /// denied, ...) is reported as a plain 404, matching `serve_local_file`'s
 /// same simplification.
+///
+/// Unless `export` is set, the content also goes through the tab's change
+/// tracker first, and the render diffs against its active waypoint. An
+/// export (Open In Browser) leaves the tracker untouched and carries no
+/// change markup.
 fn serve_document(
     mode: routes::Mode,
+    export: bool,
     version: &VersionCounter,
     filesystem: &dyn FileSystem,
     document: &DocumentSource,
@@ -333,7 +440,12 @@ fn serve_document(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let config = document.config_snapshot();
+    let mut config = document.config_snapshot();
+    config.render_options.waypoint = if export {
+        None
+    } else {
+        document.track(&markdown, mode, &config)
+    };
 
     let (html, allowed_local_paths) = document::render(
         &markdown,
@@ -681,6 +793,166 @@ mod respond_to_tests {
             &document,
         );
         assert_eq!(status_line(&response), "HTTP/1.1 404 Not Found");
+    }
+
+    // MARK: - Change tracking (`_working/DIFF-IMPLEMENTATION.md` §11.1)
+
+    use mudl_watch::FakeClock;
+    use std::time::UNIX_EPOCH;
+
+    fn query_req(query: &[(&str, &str)]) -> Request {
+        Request {
+            method: Method::Get,
+            path: "/".to_string(),
+            query: query
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// A tracked document seeded with `original`, its file already holding
+    /// `original`, on a fake clock at a fixed time.
+    fn tracked(original: &str) -> (InMemoryFileSystem, DocumentSource, FakeClock) {
+        let clock = FakeClock::new(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        let document =
+            DocumentSource::with_clock(PathBuf::from("/docs/notes.md"), Arc::new(clock.clone()));
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", original.as_bytes().to_vec());
+        document.seed_tracker(original);
+        (filesystem, document, clock)
+    }
+
+    const ORIGINAL: &str = "# Title\n\nFirst paragraph.\n";
+    const EDITED: &str = "# Title\n\nFirst paragraph.\n\nA brand new paragraph.\n";
+
+    #[test]
+    fn changed_file_renders_change_markup_in_up_mode() {
+        let version = VersionCounter::new();
+        let (filesystem, document, clock) = tracked(ORIGINAL);
+        clock.advance(Duration::from_secs(120));
+        filesystem.insert("/docs/notes.md", EDITED.as_bytes().to_vec());
+
+        let response = respond_to(&req("/"), &version, &filesystem, &document);
+        let text = body_of(&response);
+        assert!(text.contains("mud-change-ins"), "{text}");
+        assert!(text.contains("data-change-id=\""), "{text}");
+        assert!(text.contains("/assets/mud-changes.js"));
+        assert_eq!(document.change_groups().len(), 1);
+    }
+
+    #[test]
+    fn changed_file_renders_change_markup_in_down_mode() {
+        let version = VersionCounter::new();
+        let (filesystem, document, clock) = tracked(ORIGINAL);
+        clock.advance(Duration::from_secs(120));
+        filesystem.insert("/docs/notes.md", EDITED.as_bytes().to_vec());
+
+        let response = respond_to(
+            &query_req(&[("mode", "down")]),
+            &version,
+            &filesystem,
+            &document,
+        );
+        let text = body_of(&response);
+        assert!(text.contains("down-mode-output"));
+        assert!(text.contains("mud-change-ins"), "{text}");
+        assert!(text.contains("data-change-id=\""), "{text}");
+    }
+
+    #[test]
+    fn unchanged_file_renders_no_change_markup() {
+        let version = VersionCounter::new();
+        let (filesystem, document, _clock) = tracked(ORIGINAL);
+        let response = respond_to(&req("/"), &version, &filesystem, &document);
+        let text = body_of(&response);
+        assert!(!text.contains("data-change-id=\""));
+        assert!(!text.contains("/assets/mud-changes.js"));
+    }
+
+    #[test]
+    fn identical_content_requested_twice_stores_one_waypoint() {
+        let version = VersionCounter::new();
+        let (filesystem, document, clock) = tracked(ORIGINAL);
+        clock.advance(Duration::from_secs(120));
+        filesystem.insert("/docs/notes.md", EDITED.as_bytes().to_vec());
+
+        respond_to(&req("/"), &version, &filesystem, &document);
+        clock.advance(Duration::from_secs(120));
+        respond_to(&req("/"), &version, &filesystem, &document);
+
+        // Initial + one Reload; the repeat request is a redundant save.
+        assert_eq!(document.tracker().waypoints().len(), 2);
+    }
+
+    #[test]
+    fn export_renders_no_change_markup_and_leaves_the_tracker_alone() {
+        let version = VersionCounter::new();
+        let (filesystem, document, clock) = tracked(ORIGINAL);
+        clock.advance(Duration::from_secs(120));
+        filesystem.insert("/docs/notes.md", EDITED.as_bytes().to_vec());
+
+        let response = respond_to(
+            &query_req(&[("export", "1")]),
+            &version,
+            &filesystem,
+            &document,
+        );
+        let text = body_of(&response);
+        assert!(text.contains("A brand new paragraph."));
+        assert!(!text.contains("data-change-id=\""));
+        assert!(!text.contains("/assets/mud-changes.js"));
+
+        let tracker = document.tracker();
+        assert_eq!(tracker.waypoints().len(), 1);
+        assert_eq!(tracker.current().map(|c| &**c), Some(ORIGINAL));
+        assert!(tracker.changes().is_empty());
+    }
+
+    #[test]
+    fn disabled_tracking_renders_no_change_markup_but_still_tracks() {
+        let version = VersionCounter::new();
+        let (filesystem, document, clock) = tracked(ORIGINAL);
+        document.set_config(DocumentConfig {
+            changes_enabled: false,
+            ..DocumentConfig::default()
+        });
+        clock.advance(Duration::from_secs(120));
+        filesystem.insert("/docs/notes.md", EDITED.as_bytes().to_vec());
+
+        let response = respond_to(&req("/"), &version, &filesystem, &document);
+        let text = body_of(&response);
+        assert!(!text.contains("data-change-id=\""));
+        assert_eq!(document.change_groups().len(), 1);
+    }
+
+    #[test]
+    fn accept_clears_change_markup_on_the_next_request() {
+        let version = VersionCounter::new();
+        let (filesystem, document, clock) = tracked(ORIGINAL);
+        clock.advance(Duration::from_secs(120));
+        filesystem.insert("/docs/notes.md", EDITED.as_bytes().to_vec());
+        respond_to(&req("/"), &version, &filesystem, &document);
+
+        document.accept_changes();
+        let response = respond_to(&req("/"), &version, &filesystem, &document);
+        assert!(!body_of(&response).contains("data-change-id=\""));
+        assert!(document.change_groups().is_empty());
+        assert_eq!(
+            document.active_waypoint_time(),
+            Some(UNIX_EPOCH + Duration::from_secs(1_700_000_120))
+        );
+    }
+
+    #[test]
+    fn unseeded_document_is_seeded_by_its_first_request() {
+        let version = VersionCounter::new();
+        let filesystem = InMemoryFileSystem::new();
+        filesystem.insert("/docs/notes.md", ORIGINAL.as_bytes().to_vec());
+        let document = document_source();
+        let response = respond_to(&req("/"), &version, &filesystem, &document);
+        assert!(!body_of(&response).contains("data-change-id=\""));
+        assert!(document.tracker().is_seeded());
     }
 
     #[test]

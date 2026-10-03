@@ -26,12 +26,13 @@ use std::borrow::Cow;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use mudl_diff::block::{DefinitionPolicy, LeafBlock};
-use mudl_diff::list::{self, ChangeGroup, DocumentChange};
+use mudl_diff::list;
 use mudl_diff::plan::{ChangePlan, PlanCache, PlanKey};
 
 use crate::frontmatter;
 use crate::parse::ParsedMarkdown;
 
+pub use mudl_diff::list::{ChangeGroup, ChangeType, DocumentChange};
 pub use mudl_diff::plan::DEFAULT_WORD_DIFF_THRESHOLD;
 pub use tracker::{ChangeTracker, MenuItem, TrackedWaypoint, WaypointKind};
 

@@ -30,7 +30,21 @@ pub fn document_config(prefs: &Preferences) -> DocumentConfig {
         // `toolbar::Context::current_document_config` overrides this from
         // the tab's own per-open in-memory opt-in.
         allow_remote_images: false,
+        changes_enabled: prefs.changes_enabled,
+        show_inline_deletions: prefs.changes_show_inline_deletions,
+        auto_expand_changes: prefs.changes_auto_expand_groups,
+        word_diff_threshold_pct: threshold_pct(prefs.changes_word_diff_threshold),
     }
+}
+
+/// `changes_word_diff_threshold` (a 0.0..=1.0 fraction) as the integer
+/// percentage `mudl_core::changes::Waypoint` carries, clamped so an
+/// out-of-range value can't wrap.
+pub fn threshold_pct(fraction: f64) -> u8 {
+    if fraction.is_nan() {
+        return 25;
+    }
+    (fraction.clamp(0.0, 1.0) * 100.0).round() as u8
 }
 
 fn map_doc_c_alert_mode(mode: ConfigDocCAlertMode) -> CoreDocCAlertMode {
@@ -102,5 +116,43 @@ mod tests {
             document_config(&prefs).render_options.doc_c_alert_mode,
             CoreDocCAlertMode::Off
         );
+    }
+
+    #[test]
+    fn maps_change_tracking_preferences() {
+        let prefs = Preferences {
+            changes_enabled: false,
+            changes_show_inline_deletions: true,
+            changes_auto_expand_groups: true,
+            changes_word_diff_threshold: 0.4,
+            ..Preferences::default()
+        };
+        let config = document_config(&prefs);
+        assert!(!config.changes_enabled);
+        assert!(config.show_inline_deletions);
+        assert!(config.auto_expand_changes);
+        assert_eq!(config.word_diff_threshold_pct, 40);
+        assert_eq!(config.render_options.waypoint, None);
+    }
+
+    #[test]
+    fn default_preferences_match_default_document_config_for_changes() {
+        let config = document_config(&Preferences::default());
+        let default = DocumentConfig::default();
+        assert_eq!(config.changes_enabled, default.changes_enabled);
+        assert_eq!(
+            config.word_diff_threshold_pct,
+            default.word_diff_threshold_pct
+        );
+    }
+
+    #[test]
+    fn threshold_pct_rounds_and_clamps() {
+        assert_eq!(threshold_pct(0.25), 25);
+        assert_eq!(threshold_pct(0.333), 33);
+        assert_eq!(threshold_pct(1.0), 100);
+        assert_eq!(threshold_pct(2.0), 100);
+        assert_eq!(threshold_pct(-1.0), 0);
+        assert_eq!(threshold_pct(f64::NAN), 25);
     }
 }
