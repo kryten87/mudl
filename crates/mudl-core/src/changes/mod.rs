@@ -5,6 +5,8 @@
 //! - [`plan`] / [`compute_changes`] / [`compute_groups`]: diff two documents,
 //!   through one process-wide plan cache shared with the renderers.
 //! - [`tracker`]: the per-window waypoint history (`ChangeTracker`).
+//! - [`up`] / `placer` / [`down`]: the Up and Down renderers' change
+//!   markup (`render_up`/`render_down` with `RenderOptions::waypoint`).
 //!
 //! # Frontmatter and line numbers
 //!
@@ -15,7 +17,10 @@
 //! included; add [`body_line_offset`] to a body line to get a file line.
 
 pub mod collect;
+pub mod down;
+pub(crate) mod placer;
 pub mod tracker;
+pub mod up;
 
 use std::borrow::Cow;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};

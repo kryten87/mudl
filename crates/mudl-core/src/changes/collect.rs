@@ -415,7 +415,7 @@ impl<'p, 'a> Collector<'p, 'a> {
 }
 
 /// True for events that live inside a paragraph (inline content).
-fn is_inline(event: &Event) -> bool {
+pub(crate) fn is_inline(event: &Event) -> bool {
     match event {
         Event::Start(tag) => matches!(
             tag,
