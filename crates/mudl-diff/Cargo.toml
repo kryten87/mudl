@@ -1,0 +1,8 @@
+[package]
+name = "mudl-diff"
+version = "1.0.4"
+edition.workspace = true
+
+# Deliberately dependency-free (docs/IMPLEMENTATION-PLAN.md §3): the diff
+# engine is pure functions over strings and already-collected leaf blocks.
+[dependencies]

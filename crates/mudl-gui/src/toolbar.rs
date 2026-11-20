@@ -74,6 +74,19 @@ impl Context {
         self.document.set_config(self.current_document_config());
     }
 
+    /// Re-derives this tab's document config from the (already updated)
+    /// preferences and pushes it to the running server, without saving.
+    pub(crate) fn apply_document_config(&self) {
+        self.document.set_config(self.current_document_config());
+    }
+
+    /// Writes the in-memory preferences to disk (errors swallowed, as in
+    /// `save_and_apply`).
+    pub(crate) fn save_prefs(&self) {
+        let prefs = self.prefs.borrow();
+        let _ = mudl_config::save(&mudl_config::RealFileSystem, &self.prefs_path, &prefs);
+    }
+
     fn document_url(&self) -> String {
         document_url(self.addr, self.mode.get())
     }
@@ -85,6 +98,17 @@ pub fn document_url(addr: SocketAddr, mode: Mode) -> String {
     match mode {
         Mode::Up => format!("http://{addr}/"),
         Mode::Down => format!("http://{addr}/?mode=down"),
+    }
+}
+
+/// The URL Open In Browser hands to the system browser: the same page as
+/// [`document_url`] plus `export=1`, which tells the server to skip change
+/// tracking entirely (no overlays outside the app, and the browser's
+/// request doesn't count as a save the tracker has seen).
+pub fn export_url(addr: SocketAddr, mode: Mode) -> String {
+    match mode {
+        Mode::Up => format!("http://{addr}/?export=1"),
+        Mode::Down => format!("http://{addr}/?mode=down&export=1"),
     }
 }
 
@@ -211,6 +235,22 @@ mod tests {
         assert_eq!(
             document_url(addr(), Mode::Down),
             "http://127.0.0.1:53211/?mode=down"
+        );
+    }
+
+    #[test]
+    fn export_url_up_mode_carries_export_flag() {
+        assert_eq!(
+            export_url(addr(), Mode::Up),
+            "http://127.0.0.1:53211/?export=1"
+        );
+    }
+
+    #[test]
+    fn export_url_down_mode_carries_mode_and_export_flag() {
+        assert_eq!(
+            export_url(addr(), Mode::Down),
+            "http://127.0.0.1:53211/?mode=down&export=1"
         );
     }
 }

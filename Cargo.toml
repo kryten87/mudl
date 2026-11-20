@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/mudl-core",
+    "crates/mudl-diff",
     "crates/mudl-config",
     "crates/mudl-watch",
     "crates/mudl-server",

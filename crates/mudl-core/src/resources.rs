@@ -25,6 +25,9 @@ pub const MUD_NARROW_CSS: &str = include_str!("../../../resources/css/mud-narrow
 pub const MUD_PRINT_CSS: &str = include_str!("../../../resources/css/mud-print.css");
 /// Find-in-page (interactive, non-standalone mode) styles.
 pub const MUD_FIND_CSS: &str = include_str!("../../../resources/css/mud-find.css");
+/// Change-tracking styles (overlays, deletions, word markers); included only
+/// when the body carries change markup.
+pub const MUD_CHANGES_CSS: &str = include_str!("../../../resources/css/mud-changes.css");
 /// Math-block (Temml output) styles.
 pub const MUD_MATH_CSS: &str = include_str!("../../../resources/css/mud-math.css");
 
@@ -57,6 +60,9 @@ pub const MUD_UP_JS: &str = include_str!("../../../resources/js/mud-up.js");
 /// Down-mode-only client helpers (per-line syntax highlighting); no-ops
 /// when `.down-mode-output` isn't present in the page.
 pub const MUD_DOWN_JS: &str = include_str!("../../../resources/js/mud-down.js");
+/// Change-tracking client (Up overlays and navigation, Down word markers);
+/// included only when the body carries change markup.
+pub const MUD_CHANGES_JS: &str = include_str!("../../../resources/js/mud-changes.js");
 /// Runs `highlight.min.js` over Up mode's fenced code blocks (excluding
 /// Mermaid/math blocks, handled by their own init scripts).
 pub const HIGHLIGHT_INIT_JS: &str = include_str!("../../../resources/js/highlight-init.js");
@@ -84,6 +90,7 @@ pub fn lookup(name: &str) -> Option<&'static str> {
         "mud-print.css" => Some(MUD_PRINT_CSS),
         "mud-find.css" => Some(MUD_FIND_CSS),
         "mud-math.css" => Some(MUD_MATH_CSS),
+        "mud-changes.css" => Some(MUD_CHANGES_CSS),
         "theme-austere.css" => Some(THEME_AUSTERE_CSS),
         "theme-blues.css" => Some(THEME_BLUES_CSS),
         "theme-earthy.css" => Some(THEME_EARTHY_CSS),
@@ -95,6 +102,7 @@ pub fn lookup(name: &str) -> Option<&'static str> {
         "mud.js" => Some(MUD_JS),
         "mud-up.js" => Some(MUD_UP_JS),
         "mud-down.js" => Some(MUD_DOWN_JS),
+        "mud-changes.js" => Some(MUD_CHANGES_JS),
         "highlight-init.js" => Some(HIGHLIGHT_INIT_JS),
         "math-init.js" => Some(MATH_INIT_JS),
         "mermaid-init.js" => Some(MERMAID_INIT_JS),
@@ -116,6 +124,7 @@ mod tests {
         assert!(!MUD_PRINT_CSS.is_empty());
         assert!(!MUD_FIND_CSS.is_empty());
         assert!(!MUD_MATH_CSS.is_empty());
+        assert!(!MUD_CHANGES_CSS.is_empty());
         assert!(!THEME_AUSTERE_CSS.is_empty());
         assert!(!THEME_BLUES_CSS.is_empty());
         assert!(!THEME_EARTHY_CSS.is_empty());
@@ -131,6 +140,7 @@ mod tests {
         assert!(!MUD_JS.is_empty());
         assert!(!MUD_UP_JS.is_empty());
         assert!(!MUD_DOWN_JS.is_empty());
+        assert!(!MUD_CHANGES_JS.is_empty());
         assert!(!HIGHLIGHT_INIT_JS.is_empty());
         assert!(!MATH_INIT_JS.is_empty());
         assert!(!MERMAID_INIT_JS.is_empty());

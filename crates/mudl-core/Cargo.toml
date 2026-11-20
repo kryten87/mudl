@@ -1,6 +1,6 @@
 [package]
 name = "mudl-core"
-version = "1.0.3"
+version = "1.0.4"
 edition.workspace = true
 
 [dependencies]
@@ -9,3 +9,4 @@ edition.workspace = true
 # pretty-printer (mudl-core writes its own visitor) or its `getopts` CLI helper.
 pulldown-cmark = { version = "0.13", default-features = false }
 mudl-comments = { path = "../mudl-comments" }
+mudl-diff = { path = "../mudl-diff" }

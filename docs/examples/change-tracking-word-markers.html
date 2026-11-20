@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>applyWordMarkers self-test</title>
+<style>
+  body { font-family: sans-serif; margin: 2em; }
+  td, th { border: 1px solid #ccc; padding: 4px 8px; vertical-align: top; font-family: monospace; white-space: pre; }
+  .pass { color: #1a7f37; } .fail { color: #cf222e; font-weight: bold; }
+  ins { background: #c3f3ce; text-decoration: none; }
+  del { background: #ffcecb; }
+</style>
+</head>
+<body>
+<h1>applyWordMarkers self-test</h1>
+<p>Open this file directly in a browser (it loads
+<code>../../resources/js/mud-changes.js</code>). Each case puts a Down-mode
+row's already-highlighted markup in a <code>.line</code>, applies its
+<code>data-word-ins</code> / <code>data-word-del</code> ranges (UTF-16
+offsets), and compares the result. See <code>change-tracking.md</code>.</p>
+<p id="summary"></p>
+<table id="results"><tr><th>case</th><th>result</th><th>rendered</th></tr></table>
+
+<script src="../../resources/js/mud-changes.js"></script>
+<script>
+// BEGIN CASES
+var CASES = [
+  { name: "plain text",
+    html: "The quick fox.", ins: "4-9",
+    expected: "The <ins>quick</ins> fox." },
+  { name: "range crossing highlight spans",
+    html: "<span class=\"a\">The </span>quick <span class=\"b\">fox</span>.", ins: "2-12",
+    expected: "<span class=\"a\">Th<ins>e </ins></span><ins>quick </ins><span class=\"b\"><ins>fo</ins>x</span>." },
+  { name: "several ranges in one text node",
+    html: "a bb ccc dddd", ins: "0-1,5-8",
+    expected: "<ins>a</ins> bb <ins>ccc</ins> dddd" },
+  { name: "deletion ranges",
+    html: "Use a &lt; b &amp; c &gt; d here.", del: "16-17",
+    expected: "Use a &lt; b &amp; c &gt; <del>d</del> here." },
+  { name: "non-ASCII and emoji (UTF-16 offsets)",
+    html: "Café crème brûlée 😀 au menu.", ins: "21-29",
+    expected: "Café crème brûlée 😀 <ins>au menu.</ins>" },
+  { name: "CJK",
+    html: "漢字 カナ 混じり 文", ins: "3-5",
+    expected: "漢字 <ins>カナ</ins> 混じり 文" },
+  { name: "nested spans, range ends at node boundary",
+    html: "<span class=\"x\"><span class=\"y\">ab</span>cd</span>ef", ins: "1-4",
+    expected: "<span class=\"x\"><span class=\"y\">a<ins>b</ins></span><ins>cd</ins></span>ef" },
+  { name: "whole row",
+    html: "<span class=\"h\">#</span> Title", ins: "0-7",
+    expected: "<span class=\"h\"><ins>#</ins></span><ins> Title</ins>" },
+  { name: "ins and del on one row",
+    html: "one two three", ins: "8-13", del: "0-3",
+    expected: "<del>one</del> two <ins>three</ins>" },
+  { name: "range past the end is clipped",
+    html: "abc", ins: "1-99",
+    expected: "a<ins>bc</ins>" },
+  { name: "malformed and empty ranges are ignored",
+    html: "abc", ins: "x,2-2,,1-2",
+    expected: "a<ins>b</ins>c" },
+  { name: "no attributes: untouched",
+    html: "<span class=\"a\">abc</span>",
+    expected: "<span class=\"a\">abc</span>" }
+];
+// END CASES
+
+(function () {
+  var table = document.getElementById("results");
+  var passed = 0;
+  CASES.forEach(function (c) {
+    var el = document.createElement("div");
+    el.className = "line";
+    el.innerHTML = c.html;
+    if (c.ins) el.setAttribute("data-word-ins", c.ins);
+    if (c.del) el.setAttribute("data-word-del", c.del);
+    el.setAttribute("data-change-id", "change-1");
+    Mud.changes.applyWordMarkers(el);
+    var ok = el.innerHTML === c.expected;
+    if (ok) passed++;
+    var row = table.insertRow();
+    row.insertCell().textContent = c.name;
+    var res = row.insertCell();
+    res.className = ok ? "pass" : "fail";
+    res.textContent = ok ? "PASS" : "FAIL\ngot:      " + el.innerHTML + "\nexpected: " + c.expected;
+    row.insertCell().appendChild(el);
+  });
+  var summary = document.getElementById("summary");
+  summary.className = passed === CASES.length ? "pass" : "fail";
+  summary.textContent = passed + " / " + CASES.length + " passed";
+})();
+</script>
+</body>
+</html>

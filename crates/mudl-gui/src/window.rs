@@ -44,6 +44,7 @@ use mudl_server::routes::Mode;
 use mudl_server::server::{self, DocumentSource};
 use mudl_server::version::VersionCounter;
 
+use crate::changes;
 use crate::comments;
 use crate::find;
 use crate::geometry;
@@ -99,7 +100,14 @@ pub(crate) struct TabHandle {
     /// jump preserves scroll position exactly like a Space-bar toggle.
     pub(crate) pending_scroll_fraction: Rc<Cell<f64>>,
     pub(crate) find_bar: find::FindBar,
-    pub(crate) sidebar_scroller: gtk::ScrolledWindow,
+    /// The whole sidebar column (pane switcher + panes); its visibility is
+    /// View > Hide Sidebar.
+    pub(crate) sidebar: gtk::Box,
+    /// The Outline / Changes / Comments panes, by name (`"outline"`,
+    /// `"changes"`, `"comments"` — `SidebarPane::as_str`).
+    pub(crate) sidebar_stack: gtk::Stack,
+    /// The Changes bar and pane (`crate::changes`).
+    pub(crate) changes: Rc<changes::Changes>,
     /// Kept alive only to keep this tab's file watcher running (Phase
     /// 10.8) — dropped, and the watch stopped, when the tab closes (Phase
     /// 15.5's `Close`) or the window does.
@@ -292,15 +300,21 @@ fn start_tab_source(path: &Path, prefs: &Preferences) -> Result<TabSource, Strin
         std::fs::canonicalize(path).map_err(|err| format!("{}: {err}", path.display()))?;
     // Best-effort: the sidebar's initial outline just starts empty if the
     // file can't be read here (the main WebView will independently 404 for
-    // the same reason once it navigates to the server).
-    let markdown = std::fs::read_to_string(&absolute).unwrap_or_default();
+    // the same reason once it navigates to the server). Decoded lossily,
+    // exactly as the server decodes it, so the change tracker's baseline
+    // and every later request see the same text.
+    let read = std::fs::read(&absolute)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+    let markdown = read.clone().unwrap_or_default();
     let title = absolute
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     let initial_config = crate::config::document_config(prefs);
-    let (addr, document, watch) = start_server_for(absolute.clone(), initial_config)?;
+    let (addr, document, watch) =
+        start_server_for(absolute.clone(), initial_config, read.as_deref())?;
 
     Ok(TabSource {
         path: absolute,
@@ -349,6 +363,7 @@ fn build_window(
         tabs.push(handle);
     }
     let tabs = Rc::new(RefCell::new(tabs));
+    connect_changes_refresh_on_switch(&notebook, Rc::clone(&tabs));
 
     let menu_prefs_path = prefs_path.to_path_buf();
     let (menu_bar, accel_group) = menu::build(&menu::Context {
@@ -374,6 +389,30 @@ fn build_window(
         window,
         notebook,
         tabs,
+    });
+}
+
+/// Refreshes the newly current tab's Changes bar and pane on every tab
+/// switch (it may need to catch up with a Show/Hide Changes made in
+/// another tab). Deferred to an idle callback: `switch-page` also fires
+/// from inside File > Close's `remove_page`, before `tabs` has dropped the
+/// closed tab's entry, so indexes only line up again afterwards.
+fn connect_changes_refresh_on_switch(notebook: &gtk::Notebook, tabs: Rc<RefCell<Vec<TabHandle>>>) {
+    notebook.connect_switch_page(move |notebook, _page, _index| {
+        let notebook = notebook.clone();
+        let tabs = Rc::clone(&tabs);
+        gtk::glib::idle_add_local_once(move || {
+            let Some(index) = notebook.current_page() else {
+                return;
+            };
+            let changes = match tabs.try_borrow() {
+                Ok(tabs) => tabs.get(index as usize).map(|tab| Rc::clone(&tab.changes)),
+                Err(_) => None,
+            };
+            if let Some(changes) = changes {
+                changes.refresh();
+            }
+        });
     });
 }
 
@@ -458,60 +497,10 @@ fn build_tab(
     connect_zoom_restore(&webview, Rc::clone(&mode), Rc::clone(&prefs));
     connect_link_navigation(&webview, addr, Rc::clone(registry));
 
-    // Phase 14.7: the "Comments" sidebar pane is an alternative to the
-    // outline pane (Appendix B's `sidebarPane` preference), not a second
-    // widget alongside it — one `gtk::Paned` slot, like the outline pane
-    // always had.
-    let sidebar_pane = prefs.borrow().sidebar_pane;
-
-    let sidebar_scroller =
-        gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-    sidebar_scroller.set_size_request(220, -1);
-    // Phase 15.5's "Hide Sidebar" menu item toggles this same visibility
-    // and writes it back to `sidebar_enabled` — this is just the initial
-    // state a freshly-opened tab starts from.
-    sidebar_scroller.set_visible(prefs.borrow().sidebar_enabled);
-    match sidebar_pane {
-        mudl_config::SidebarPane::Comments => {
-            // Unlike Outline (a single `TreeView` that overflows into
-            // `sidebar_scroller`'s own scrollbar), the Comments pane
-            // is itself a column (list + compose box below it), so it
-            // manages its own scrolling for just the list and packs
-            // directly into the outer scroller's viewport rather than
-            // adding a second, redundant layer of scrolling around the
-            // whole column.
-            let list_view = sidebar::build_comments_list_view();
-            connect_comments_navigation(&list_view, &webview);
-            let list_scroller =
-                gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
-            list_scroller.add(&list_view);
-
-            let comments_ctx = comments::Context {
-                list_view,
-                path: path.clone(),
-            };
-            let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            column.pack_start(&list_scroller, true, true, 0);
-            column.pack_start(&comments::build(&comments_ctx), false, false, 0);
-            sidebar_scroller.add(&column);
-        }
-        mudl_config::SidebarPane::Outline => {
-            let headings = extract_headings(&markdown);
-            let outline_tree = outline::build_tree(&headings);
-            let outline_view = sidebar::build_outline_tree_view(&outline_tree);
-            connect_sidebar_navigation(&outline_view, &webview, Rc::clone(&mode));
-            sidebar_scroller.add(&outline_view);
-        }
-    }
-
-    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-    paned.pack1(&sidebar_scroller, false, false);
-    paned.pack2(&webview, true, true);
-
     let toolbar_ctx = toolbar::Context {
         webview: webview.clone(),
         mode: Rc::clone(&mode),
-        prefs,
+        prefs: Rc::clone(&prefs),
         prefs_path: prefs_path.to_path_buf(),
         document,
         addr,
@@ -519,6 +508,97 @@ fn build_tab(
         // doc comment on why this can't be a persisted preference.
         allow_remote_images: Rc::new(Cell::new(false)),
     };
+    let changes = changes::build(&toolbar_ctx, Rc::clone(&pending_scroll_fraction));
+
+    // The sidebar: Outline / Changes / Comments panes in a `gtk::Stack`,
+    // switched at runtime by a `gtk::StackSwitcher` above them; the pane
+    // last switched to is persisted as `sidebar_pane`.
+    let sidebar_stack = gtk::Stack::new();
+
+    let headings = extract_headings(&markdown);
+    let outline_tree = outline::build_tree(&headings);
+    let outline_view = sidebar::build_outline_tree_view(&outline_tree);
+    connect_sidebar_navigation(&outline_view, &webview, Rc::clone(&mode));
+    let outline_scroller =
+        gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    outline_scroller.add(&outline_view);
+    sidebar_stack.add_titled(
+        &outline_scroller,
+        mudl_config::SidebarPane::Outline.as_str(),
+        "Outline",
+    );
+
+    sidebar_stack.add_titled(
+        &changes.pane,
+        mudl_config::SidebarPane::Changes.as_str(),
+        "Changes",
+    );
+
+    // The Comments pane is itself a column (list + compose box below it),
+    // so only its list scrolls.
+    let list_view = sidebar::build_comments_list_view();
+    connect_comments_navigation(&list_view, &webview);
+    let list_scroller =
+        gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    list_scroller.add(&list_view);
+    let comments_ctx = comments::Context {
+        list_view,
+        path: path.clone(),
+    };
+    let comments_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    comments_column.pack_start(&list_scroller, true, true, 0);
+    comments_column.pack_start(&comments::build(&comments_ctx), false, false, 0);
+    sidebar_stack.add_titled(
+        &comments_column,
+        mudl_config::SidebarPane::Comments.as_str(),
+        "Comments",
+    );
+
+    let sidebar_switcher = gtk::StackSwitcher::new();
+    sidebar_switcher.set_stack(Some(&sidebar_stack));
+    sidebar_switcher.set_halign(gtk::Align::Center);
+    sidebar_switcher.set_margin_top(4);
+    sidebar_switcher.set_margin_bottom(4);
+
+    let sidebar_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sidebar_column.set_size_request(220, -1);
+    sidebar_column.pack_start(&sidebar_switcher, false, false, 0);
+    sidebar_column.pack_start(&sidebar_stack, true, true, 0);
+    // Phase 15.5's "Hide Sidebar" menu item toggles this same visibility
+    // and writes it back to `sidebar_enabled` — this is just the initial
+    // state a freshly-opened tab starts from. `no_show_all` keeps the
+    // window's `show_all` from overriding it.
+    sidebar_column.show_all();
+    sidebar_column.set_no_show_all(true);
+    sidebar_column.set_visible(prefs.borrow().sidebar_enabled);
+
+    // The visible child can only be chosen once the children are shown.
+    let initial_pane = prefs.borrow().sidebar_pane;
+    sidebar_stack.set_visible_child_name(initial_pane.as_str());
+    connect_sidebar_pane_persistence(&sidebar_stack, Rc::clone(&prefs), prefs_path);
+
+    // Every finished load: the server has just fed the change tracker, and
+    // the file may have changed under the comments list too.
+    {
+        let changes = Rc::clone(&changes);
+        webview.connect_load_changed(move |_, event| {
+            if event == webkit2gtk::LoadEvent::Finished {
+                changes.refresh();
+                comments::refresh_list(&comments_ctx);
+            }
+        });
+    }
+
+    // The Changes bar floats over the document only (not the sidebar), so
+    // its default bottom-center position centers on the page.
+    let document_overlay = gtk::Overlay::new();
+    document_overlay.add(&webview);
+    document_overlay.add_overlay(&changes.bar);
+
+    let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+    paned.pack1(&sidebar_column, false, false);
+    paned.pack2(&document_overlay, true, true);
+
     let toolbar_widget = toolbar::build(&toolbar_ctx);
 
     let (overlay, find_bar) = find::build(&paned, &webview);
@@ -540,10 +620,41 @@ fn build_tab(
         toolbar_ctx,
         pending_scroll_fraction,
         find_bar,
-        sidebar_scroller,
+        sidebar: sidebar_column,
+        sidebar_stack,
+        changes,
         _watch: watch,
     };
     (vbox, handle)
+}
+
+/// Persists the sidebar pane whenever the switcher (or the View menu)
+/// changes it, so the next tab opens on the same pane.
+fn connect_sidebar_pane_persistence(
+    stack: &gtk::Stack,
+    prefs: Rc<RefCell<Preferences>>,
+    prefs_path: &Path,
+) {
+    let prefs_path = prefs_path.to_path_buf();
+    stack.connect_visible_child_name_notify(move |stack| {
+        let Some(pane) = stack
+            .visible_child_name()
+            .and_then(|name| mudl_config::SidebarPane::parse(&name))
+        else {
+            return;
+        };
+        // `try_borrow_mut`: a switch triggered while something up the stack
+        // still reads the preferences just isn't persisted, rather than
+        // panicking.
+        let Ok(mut current) = prefs.try_borrow_mut() else {
+            return;
+        };
+        if current.sidebar_pane == pane {
+            return;
+        }
+        current.sidebar_pane = pane;
+        let _ = mudl_config::save(&mudl_config::RealFileSystem, &prefs_path, &current);
+    });
 }
 
 /// After every finished page load, scrolls to whatever fraction was
@@ -693,7 +804,11 @@ fn open_in_new_window(path: &Path) {
 /// re-navigates the WebView to `/` with `?mode=down` when the new mode is
 /// Down (its absence already means Up — see `mudl_server::routes::dispatch`).
 /// Connected on the tab's own container (see the module doc comment on
-/// per-tab shortcut scoping), not the shared window.
+/// per-tab shortcut scoping), not the shared window — and also on the
+/// WebView itself: WebKit consumes Space (to scroll the page) in its class
+/// handler, so it never bubbles up to the container while the document has
+/// focus. A handler connected on the WebView runs before that class
+/// handler, so it gets Space first.
 fn connect_mode_toggle(
     tab_container: &gtk::Box,
     webview: &webkit2gtk::WebView,
@@ -701,17 +816,25 @@ fn connect_mode_toggle(
     mode: Rc<Cell<Mode>>,
     pending_scroll_fraction: Rc<Cell<f64>>,
 ) {
-    let webview = webview.clone();
-    tab_container.connect_key_press_event(move |_widget, event| {
-        if event.keyval() != gtk::gdk::keys::constants::space {
-            return gtk::glib::Propagation::Proceed;
+    let make_handler = || {
+        let webview = webview.clone();
+        let mode = Rc::clone(&mode);
+        let pending_scroll_fraction = Rc::clone(&pending_scroll_fraction);
+        move |event: &gtk::gdk::EventKey| {
+            if event.keyval() != gtk::gdk::keys::constants::space {
+                return gtk::glib::Propagation::Proceed;
+            }
+
+            let target = next_mode(mode.get());
+            navigate_to_mode(&webview, addr, &mode, &pending_scroll_fraction, target);
+
+            gtk::glib::Propagation::Stop
         }
-
-        let target = next_mode(mode.get());
-        navigate_to_mode(&webview, addr, &mode, &pending_scroll_fraction, target);
-
-        gtk::glib::Propagation::Stop
-    });
+    };
+    let handler = make_handler();
+    tab_container.connect_key_press_event(move |_, event| handler(event));
+    let handler = make_handler();
+    webview.connect_key_press_event(move |_, event| handler(event));
 }
 
 /// Captures the current scroll fraction, sets `mode` to `target`, and
@@ -802,6 +925,7 @@ fn connect_comments_navigation(tree_view: &gtk::TreeView, webview: &webkit2gtk::
 fn start_server_for(
     path: PathBuf,
     config: DocumentConfig,
+    initial_markdown: Option<&str>,
 ) -> Result<(SocketAddr, Arc<DocumentSource>, mudl_watch::WatchHandle), String> {
     let listener = server::bind().map_err(|err| format!("failed to start local server: {err}"))?;
     let addr = listener
@@ -812,6 +936,14 @@ fn start_server_for(
     let filesystem = Arc::new(RealFileSystem);
     let document = Arc::new(DocumentSource::new(path.clone()));
     document.set_config(config);
+    // The "since document opened" baseline, taken from the content read at
+    // open time rather than from whichever request happens to arrive first
+    // (`_working/DIFF-IMPLEMENTATION.md` §4, decision 3). An unreadable
+    // file leaves the tracker unseeded; its first successful request seeds
+    // it instead.
+    if let Some(markdown) = initial_markdown {
+        document.seed_tracker(markdown);
+    }
 
     let document_for_thread = Arc::clone(&document);
     let version_for_server = version.clone();

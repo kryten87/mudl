@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "mudl-cli"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "libc",
  "mudl-core",
@@ -439,26 +439,31 @@ dependencies = [
 
 [[package]]
 name = "mudl-comments"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "mudl-config"
-version = "1.0.3"
+version = "1.0.4"
 
 [[package]]
 name = "mudl-core"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "mudl-comments",
+ "mudl-diff",
  "pulldown-cmark",
 ]
 
 [[package]]
+name = "mudl-diff"
+version = "1.0.4"
+
+[[package]]
 name = "mudl-gui"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gtk",
  "javascriptcore-rs",
@@ -472,7 +477,7 @@ dependencies = [
 
 [[package]]
 name = "mudl-server"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "mudl-core",
  "mudl-watch",
@@ -480,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "mudl-watch"
-version = "1.0.3"
+version = "1.0.4"
 
 [[package]]
 name = "once_cell"

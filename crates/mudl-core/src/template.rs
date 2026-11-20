@@ -211,6 +211,16 @@ pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection
     let mut stylesheets = Vec::new();
     let mut scripts = vec!["mud.js"];
 
+    // Change markup only exists when the server rendered against a waypoint
+    // (`RenderOptions::waypoint`), so an export or a CLI render never carries
+    // these. `mud-changes.js` goes straight after `mud.js`: `mud-down.js`
+    // calls its `Mud.changes.applyWordMarkers` as it highlights each line.
+    let has_changes = body_html.contains("data-change-id");
+    if has_changes {
+        stylesheets.push("mud-changes.css");
+        scripts.push("mud-changes.js");
+    }
+
     if body_html.contains("up-mode-output") {
         scripts.push("mud-up.js");
     }
@@ -243,7 +253,13 @@ pub fn select_assets(body_html: &str, options: &RenderOptions) -> AssetSelection
     // that isn't Mermaid" — a Mermaid-only document also loads highlight.js
     // under this rule, which is harmless (client-side JS is free to no-op on
     // a language it doesn't touch after Mermaid replaces the block).
-    if body_html.contains("<pre><code") {
+    // An inserted or deleted code block carries its change class on the
+    // `<pre>` (`<pre class="mud-change-ins" …><code …>`), which the plain
+    // `<pre><code` marker misses.
+    if body_html.contains("<pre><code")
+        || body_html.contains("<pre class=\"mud-change-ins\"")
+        || body_html.contains("<pre class=\"mud-change-del\"")
+    {
         scripts.push("highlight.min.js");
         scripts.push("highlight-init.js");
     }
@@ -885,6 +901,56 @@ mod select_assets_tests {
     fn no_code_fence_omits_highlight_script() {
         let selection = select_assets("<p>no code here</p>", &options(true));
         assert!(!selection.scripts.contains(&"highlight.min.js"));
+    }
+
+    #[test]
+    fn change_markup_selects_change_assets() {
+        let selection = select_assets(
+            r#"<div class="up-mode-output"><p class="mud-change-ins" data-change-id="change-1">x</p></div>"#,
+            &options(false),
+        );
+        assert!(selection.stylesheets.contains(&"mud-changes.css"));
+        assert!(selection.scripts.contains(&"mud-changes.js"));
+    }
+
+    #[test]
+    fn no_change_markup_omits_change_assets() {
+        let selection = select_assets(
+            r#"<div class="up-mode-output"><p>x</p></div>"#,
+            &options(false),
+        );
+        assert!(!selection.stylesheets.contains(&"mud-changes.css"));
+        assert!(!selection.scripts.contains(&"mud-changes.js"));
+    }
+
+    #[test]
+    fn change_script_loads_before_the_mode_scripts() {
+        let selection = select_assets(
+            r#"<div class="down-mode-output"><div class="line dl-ins" data-line="1" data-change-id="change-1">x</div></div>"#,
+            &options(false),
+        );
+        assert_eq!(
+            selection.scripts,
+            vec!["mud.js", "mud-changes.js", "mud-down.js"]
+        );
+    }
+
+    #[test]
+    fn change_css_precedes_print_css() {
+        let selection = select_assets(r#"<p data-change-id="change-1">x</p>"#, &options(false));
+        let pos = |name| selection.stylesheets.iter().position(|s| *s == name);
+        assert!(pos("mud-changes.css") < pos("mud-print.css"));
+    }
+
+    #[test]
+    fn changed_code_block_selects_highlight_script() {
+        for html in [
+            r#"<pre class="mud-change-ins" data-change-id="change-1"><code class="language-rust">x</code></pre>"#,
+            r#"<pre class="mud-change-del" data-change-id="change-1"><code class="language-rust">x</code></pre>"#,
+        ] {
+            let selection = select_assets(html, &options(true));
+            assert!(selection.scripts.contains(&"highlight-init.js"), "{html}");
+        }
     }
 
     #[test]

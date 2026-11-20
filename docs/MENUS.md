@@ -20,6 +20,7 @@
 - Select All <Ctrl-A>
 - --- horizontal separator
 - Add Comment <Ctrl-Shift-K>
+- Accept Changes
 - --- horizontal separator
 - Find <Ctrl-F>
 - Find Next <Ctrl-G>
@@ -28,7 +29,11 @@
 
 ## View
 - Hide Sidebar <Ctrl-Shift-S>
-- Show Comments <Ctrl-Shift-K>
+- Show Comments <Ctrl-Shift-K> (switches the sidebar to its Comments pane)
+- --- horizontal separator
+- Show Changes <Ctrl-Shift-C> (checkmark; unchecked hides the Changes bar, overlays and pane content)
+- Next Change <Ctrl-.> (mudl addition — `mud` has no shortcut; same as the Changes bar's Next button)
+- Previous Change <Ctrl-,> (mudl addition — `mud` has no shortcut; same as the Changes bar's Previous button)
 - --- horizontal separator
 - Mark Up
 - Mark Down

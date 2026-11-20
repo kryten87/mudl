@@ -24,6 +24,11 @@ pub fn parser_options() -> Options {
 /// e.g. to inspect a blockquote's first paragraph before deciding whether
 /// it opens a GFM/DocC alert, without consuming the events it peeked at.
 pub struct ParsedMarkdown<'a> {
+    /// The parsed text; every event range indexes into it. Kept so that
+    /// consumers needing whole source lines (the change-tracking leaf
+    /// collector, `crate::changes::collect`) can't pair a parse with the
+    /// wrong text.
+    pub source: &'a str,
     pub events: Vec<(Event<'a>, Range<usize>)>,
 }
 
@@ -31,6 +36,7 @@ impl<'a> ParsedMarkdown<'a> {
     pub fn new(markdown: &'a str) -> Self {
         let parser = Parser::new_ext(markdown, parser_options());
         Self {
+            source: markdown,
             events: parser.into_offset_iter().collect(),
         }
     }

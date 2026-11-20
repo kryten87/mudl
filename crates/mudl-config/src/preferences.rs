@@ -17,6 +17,9 @@ use std::ops::RangeInclusive;
 /// negative, or absurdly large) `WebView::set_zoom_level` call.
 const ZOOM_RANGE: RangeInclusive<f64> = 0.1..=10.0;
 
+/// Valid range for `changes_word_diff_threshold`: a similarity fraction.
+const FRACTION_RANGE: RangeInclusive<f64> = 0.0..=1.0;
+
 macro_rules! enum_pref {
     ($name:ident { $($variant:ident => $str:literal),+ $(,)? }, default = $default:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,7 @@ enum_pref!(FolderOpenBehavior { Index => "index", Tabs => "tabs" }, default = In
 
 enum_pref!(SidebarPane {
     Outline => "outline",
+    Changes => "changes",
     Comments => "comments",
 }, default = Outline);
 
@@ -112,6 +116,17 @@ pub struct Preferences {
     /// `openInDefaultFormat`: a plain command string (e.g. `"$EDITOR"`).
     /// `None` means "use `xdg-open`".
     pub open_in_default_command: Option<String>,
+    /// Change tracking's master toggle (Changes bar, document markup,
+    /// Changes pane content).
+    pub changes_enabled: bool,
+    /// Show deleted words (`<del>`) inside inserted blocks.
+    pub changes_show_inline_deletions: bool,
+    /// Start deletion/mixed change groups expanded
+    /// (`is-auto-expand-changes`).
+    pub changes_auto_expand_groups: bool,
+    /// Word-diff similarity threshold, 0.0..=1.0: below it a changed block
+    /// shows as a whole deletion + insertion rather than word-level edits.
+    pub changes_word_diff_threshold: f64,
 }
 
 impl Default for Preferences {
@@ -135,6 +150,10 @@ impl Default for Preferences {
             enabled_extensions: vec!["mermaid".to_string(), "copy-code".to_string()],
             ui_floating_controls_position: FloatingControlsPosition::default(),
             open_in_default_command: None,
+            changes_enabled: true,
+            changes_show_inline_deletions: false,
+            changes_auto_expand_groups: false,
+            changes_word_diff_threshold: 0.25,
         }
     }
 }
@@ -263,6 +282,26 @@ impl Preferences {
                         Some(value.clone())
                     };
                 }
+                "changes_enabled" => {
+                    if let Some(v) = parse_bool(value) {
+                        prefs.changes_enabled = v;
+                    }
+                }
+                "changes_show_inline_deletions" => {
+                    if let Some(v) = parse_bool(value) {
+                        prefs.changes_show_inline_deletions = v;
+                    }
+                }
+                "changes_auto_expand_groups" => {
+                    if let Some(v) = parse_bool(value) {
+                        prefs.changes_auto_expand_groups = v;
+                    }
+                }
+                "changes_word_diff_threshold" => {
+                    if let Some(v) = parse_f64_in_range(value, FRACTION_RANGE) {
+                        prefs.changes_word_diff_threshold = v;
+                    }
+                }
                 _ => {} // unknown key: ignored, for forward compatibility
             }
         }
@@ -335,6 +374,22 @@ impl Preferences {
             (
                 "open_in_default_command".to_string(),
                 self.open_in_default_command.clone().unwrap_or_default(),
+            ),
+            (
+                "changes_enabled".to_string(),
+                bool_str(self.changes_enabled),
+            ),
+            (
+                "changes_show_inline_deletions".to_string(),
+                bool_str(self.changes_show_inline_deletions),
+            ),
+            (
+                "changes_auto_expand_groups".to_string(),
+                bool_str(self.changes_auto_expand_groups),
+            ),
+            (
+                "changes_word_diff_threshold".to_string(),
+                self.changes_word_diff_threshold.to_string(),
             ),
         ]
     }
@@ -534,6 +589,45 @@ mod tests {
     }
 
     #[test]
+    fn changes_sidebar_pane_parses() {
+        let entries = vec![("sidebar_pane".to_string(), "changes".to_string())];
+        assert_eq!(
+            Preferences::from_entries(&entries).sidebar_pane,
+            SidebarPane::Changes
+        );
+    }
+
+    #[test]
+    fn changes_defaults() {
+        let prefs = Preferences::default();
+        assert!(prefs.changes_enabled);
+        assert!(!prefs.changes_show_inline_deletions);
+        assert!(!prefs.changes_auto_expand_groups);
+        assert_eq!(prefs.changes_word_diff_threshold, 0.25);
+    }
+
+    #[test]
+    fn changes_word_diff_threshold_out_of_range_falls_back_to_default() {
+        for bad in ["1.5", "-0.1", "lots"] {
+            let entries = vec![("changes_word_diff_threshold".to_string(), bad.to_string())];
+            assert_eq!(
+                Preferences::from_entries(&entries).changes_word_diff_threshold,
+                0.25,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn changes_word_diff_threshold_in_range_is_applied() {
+        let entries = vec![("changes_word_diff_threshold".to_string(), "0.6".to_string())];
+        assert_eq!(
+            Preferences::from_entries(&entries).changes_word_diff_threshold,
+            0.6
+        );
+    }
+
+    #[test]
     fn round_trip_default_preferences() {
         let prefs = Preferences::default();
         assert_eq!(Preferences::from_entries(&prefs.to_entries()), prefs);
@@ -551,7 +645,7 @@ mod tests {
             down_mode_show_line_numbers: false,
             down_mode_wrap_lines: false,
             sidebar_enabled: true,
-            sidebar_pane: SidebarPane::Comments,
+            sidebar_pane: SidebarPane::Changes,
             markdown_doc_c_alert_mode: DocCAlertMode::Off,
             ui_use_heading_as_title: false,
             ui_show_readable_column: true,
@@ -560,6 +654,10 @@ mod tests {
             enabled_extensions: vec!["mermaid".to_string()],
             ui_floating_controls_position: FloatingControlsPosition::TopRight,
             open_in_default_command: Some("$EDITOR".to_string()),
+            changes_enabled: false,
+            changes_show_inline_deletions: true,
+            changes_auto_expand_groups: true,
+            changes_word_diff_threshold: 0.4,
         };
         assert_eq!(Preferences::from_entries(&prefs.to_entries()), prefs);
     }

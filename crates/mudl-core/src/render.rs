@@ -14,9 +14,15 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use mudl_diff::block::{LeafBlock, LeafTag};
+use mudl_diff::line::Annotation as LineAnnotation;
+use mudl_diff::word::WordSpan;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, LinkType, Tag, TagEnd};
 
 use crate::alerts::{detect_docc_aside, detect_gfm_alert, parse_aside_tag, AlertCategory};
+use crate::changes::collect::{is_display_math, is_inline};
+use crate::changes::placer::Context as PlaceContext;
+use crate::changes::up::{ChangeAttrs, Role, UpChanges, WordSpanEmitter};
 use crate::comments_html::{comments_section, footnotes_section};
 use crate::emoji::replace_shortcodes;
 use crate::encoding::html_escape;
@@ -37,6 +43,11 @@ use crate::slug::Tracker;
 /// document body's own rendered HTML — otherwise the raw YAML would be fed
 /// straight into the CommonMark parser, which happily misreads `key:`
 /// lines as paragraphs and any bare `# comment` as a heading.
+///
+/// With `options.waypoint` set (and differing from `markdown`), changed
+/// blocks carry change-tracking markup — see [`crate::changes::up`] for
+/// the contract. Without one, or when nothing changed, the output is
+/// byte-identical to a plain render.
 pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
     let (body, frontmatter_html) = match frontmatter::extract(markdown) {
         Some(fm) => {
@@ -48,23 +59,41 @@ pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
 
     let parsed = ParsedMarkdown::new(&body);
     let footnote_numbers = number_footnotes(&parsed.events);
-    let mut renderer = Renderer {
-        events: &parsed.events,
-        pos: 0,
-        out: frontmatter_html,
-        slugs: Tracker::new(),
-        options,
-        table_alignments: Vec::new(),
-        in_table_head: false,
-        cell_index: 0,
-        skip_leading_dollar: false,
-        footnote_numbers: &footnote_numbers,
-    };
+    let mut renderer = Renderer::new(&parsed.events, options, &footnote_numbers);
+    renderer.out = frontmatter_html;
+    // Change tracking (`_working/DIFF-IMPLEMENTATION.md` §9.2): only when
+    // a waypoint is set *and* it differs, so an unchanged document renders
+    // byte-identically to a plain one.
+    renderer.changes = options
+        .waypoint
+        .as_ref()
+        .and_then(|waypoint| UpChanges::build(waypoint, markdown, options));
     renderer.run();
+    if let Some(changes) = renderer.changes.as_mut() {
+        let trailing = changes.placer.trailing_html();
+        renderer.out.push_str(&trailing);
+    }
+    // The bottom sections render definition bodies through `render_up`
+    // again; those are never change-tracked (the Up policy skips
+    // definitions), so they must not see the waypoint.
+    let section_options;
+    let section_options = if options.waypoint.is_some() {
+        section_options = RenderOptions {
+            waypoint: None,
+            ..options.clone()
+        };
+        &section_options
+    } else {
+        options
+    };
+    renderer.out.push_str(&footnotes_section(
+        &body,
+        &footnote_numbers,
+        section_options,
+    ));
     renderer
         .out
-        .push_str(&footnotes_section(&body, &footnote_numbers, options));
-    renderer.out.push_str(&comments_section(&body, options));
+        .push_str(&comments_section(&body, section_options));
     renderer.out
 }
 
@@ -79,7 +108,7 @@ pub fn render_up(markdown: &str, options: &RenderOptions) -> String {
 /// for (the definition-body skip in `render_container` handles the
 /// exclusion structurally, by discarding the nested marker's *output*
 /// rather than by never assigning it a number).
-fn number_footnotes(events: &[(Event, Range<usize>)]) -> HashMap<String, u32> {
+pub(crate) fn number_footnotes(events: &[(Event, Range<usize>)]) -> HashMap<String, u32> {
     let mut numbers = HashMap::new();
     let mut next_number = 1u32;
     for (event, _) in events {
@@ -110,7 +139,16 @@ fn number_footnotes(events: &[(Event, Range<usize>)]) -> HashMap<String, u32> {
 /// Visual line numbering is CSS-driven from the `data-line` attribute,
 /// matching `mud`'s approach — this function only emits the attribute,
 /// not rendered number text.
-pub fn render_down(markdown: &str, _options: &RenderOptions) -> String {
+///
+/// With `options.waypoint` set (and differing from `markdown`), changed
+/// rows are marked and deleted rows put back — see
+/// [`crate::changes::down`]. Otherwise the output is unchanged.
+pub fn render_down(markdown: &str, options: &RenderOptions) -> String {
+    if let Some(waypoint) = &options.waypoint {
+        if let Some(html) = crate::changes::down::render(waypoint, markdown) {
+            return html;
+        }
+    }
     let mut out = String::new();
     for (index, line) in markdown.lines().enumerate() {
         out.push_str("<div class=\"line\" data-line=\"");
@@ -140,9 +178,45 @@ struct Renderer<'a> {
     /// computed once by `number_footnotes` before the walk begins so a
     /// `FootnoteReference` can render its marker without re-scanning.
     footnote_numbers: &'a HashMap<String, u32>,
+
+    // MARK: Change tracking (all inert for a plain render)
+    /// The Up-mode change overlay; `None` renders exactly as without
+    /// change tracking.
+    changes: Option<UpChanges>,
+    /// The active word-span cursor of the block being rendered.
+    emitter: Option<WordSpanEmitter>,
+    /// A simple loose list item's word spans, handed to its paragraph.
+    item_spans: Option<Vec<WordSpan>>,
+    /// Set while rendering a deleted block from the old document: comment
+    /// markers are suppressed so the surviving block's marker stays the
+    /// only anchor for the comment in the DOM.
+    is_deletion_render: bool,
 }
 
 impl<'a> Renderer<'a> {
+    fn new(
+        events: &'a [(Event<'a>, Range<usize>)],
+        options: &'a RenderOptions,
+        footnote_numbers: &'a HashMap<String, u32>,
+    ) -> Self {
+        Renderer {
+            events,
+            pos: 0,
+            out: String::new(),
+            slugs: Tracker::new(),
+            options,
+            table_alignments: Vec::new(),
+            in_table_head: false,
+            cell_index: 0,
+            skip_leading_dollar: false,
+            footnote_numbers,
+            changes: None,
+            emitter: None,
+            item_spans: None,
+            is_deletion_render: false,
+        }
+    }
+
     fn current(&self) -> Option<&Event<'a>> {
         self.events.get(self.pos).map(|(e, _)| e)
     }
@@ -318,34 +392,293 @@ impl<'a> Renderer<'a> {
         self.out.push_str("</code>");
     }
 
+    /// The byte range of the `Start` event `render_container` was just
+    /// handed (always `self.pos - 1` on entry): the key change tracking
+    /// joins blocks on.
+    fn start_range(&self) -> Range<usize> {
+        self.events[self.pos - 1].1.clone()
+    }
+
+    /// Writes a block element's opening tag: `<name{attrs} class="…">`.
+    /// `class` may be empty (no `class` attribute is written). Every
+    /// block arm opens its element through here so that change tracking
+    /// has a single place to add its attributes, keyed by the block's
+    /// source `range` (inline tags are unaffected): any deletions keyed to
+    /// the block are emitted first, then the tag with `mud-change-ins`
+    /// merged into its class and the `data-change-*` attributes appended.
+    fn open_tag(&mut self, name: &str, class: &str, attrs: &str, range: &Range<usize>) {
+        let context = if name == "li" {
+            PlaceContext::ListItem
+        } else {
+            PlaceContext::Block
+        };
+        let change = self.change_attrs(range, context);
+        self.write_open_tag(name, class, attrs, change.as_ref());
+    }
+
+    fn write_open_tag(
+        &mut self,
+        name: &str,
+        class: &str,
+        attrs: &str,
+        change: Option<&ChangeAttrs>,
+    ) {
+        self.out.push('<');
+        self.out.push_str(name);
+        self.out.push_str(attrs);
+        let change_class = change.map_or("", |c| c.class);
+        if !class.is_empty() || !change_class.is_empty() {
+            self.out.push_str(" class=\"");
+            self.out.push_str(class);
+            if !class.is_empty() && !change_class.is_empty() {
+                self.out.push(' ');
+            }
+            self.out.push_str(change_class);
+            self.out.push('"');
+        }
+        if let Some(change) = change {
+            self.out.push_str(&change.data);
+        }
+        self.out.push('>');
+    }
+
+    // MARK: - Change tracking hooks
+
+    /// Emits the deletions keyed to the block at `range` and returns its
+    /// insertion attributes, if it changed. A no-op without a waypoint.
+    fn change_attrs(&mut self, range: &Range<usize>, context: PlaceContext) -> Option<ChangeAttrs> {
+        let changes = self.changes.as_mut()?;
+        let preceding = changes.placer.preceding_html(range, context);
+        self.out.push_str(&preceding);
+        changes.attrs(range)
+    }
+
+    /// The word spans of the changed block at `range` whose inline events
+    /// are `lo..hi`, unless the block renders math (its MathML
+    /// substitution would desync the cursor; it keeps whole-block
+    /// treatment instead, as in `mud`).
+    fn block_spans(&self, range: &Range<usize>, lo: usize, hi: usize) -> Option<Vec<WordSpan>> {
+        let spans = self.changes.as_ref()?.word_spans(range)?;
+        (!contains_inline_math(&self.events[lo..hi.min(self.events.len())])).then(|| spans.to_vec())
+    }
+
+    /// [`Renderer::block_spans`] for the container whose `Start` is at
+    /// `start` (its extent is only computed for a changed block).
+    fn container_spans(&self, range: &Range<usize>, start: usize) -> Option<Vec<WordSpan>> {
+        self.changes.as_ref()?.word_spans(range)?;
+        self.block_spans(range, start + 1, self.matching_end(start))
+    }
+
+    /// Starts an insertion-role cursor over `spans`; false when there are
+    /// none or one is already active (the caller then must not finish it).
+    fn activate(&mut self, spans: Option<Vec<WordSpan>>) -> bool {
+        match spans {
+            Some(spans) if self.emitter.is_none() => {
+                let show = self
+                    .changes
+                    .as_ref()
+                    .is_some_and(|c| c.show_inline_deletions);
+                self.emitter = Some(WordSpanEmitter::new(spans, Role::Insertion, show));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Flushes and clears the active cursor.
+    fn finish_spans(&mut self) {
+        if let Some(mut emitter) = self.emitter.take() {
+            self.out.push_str(&emitter.finish());
+        }
+    }
+
+    /// Feeds `chars` characters to the active cursor (`emit` false for
+    /// breaks and alt text) and closes its marker. Returns false without
+    /// a cursor.
+    fn advance_spans(&mut self, chars: usize, emit: bool) -> bool {
+        let Some(emitter) = self.emitter.as_mut() else {
+            return false;
+        };
+        let mut html = emitter.advance(chars, emit);
+        html.push_str(&emitter.close_open_tag());
+        self.out.push_str(&html);
+        true
+    }
+
+    /// Emits a run of literal text: through the cursor when one is
+    /// active, otherwise shortcode-replaced and escaped.
+    fn emit_text(&mut self, text: &str) {
+        if !self.advance_spans(text.chars().count(), true) {
+            self.out.push_str(&html_escape(&replace_shortcodes(text)));
+        }
+    }
+
+    /// Index of the `End` matching the `Start` at `start`.
+    fn matching_end(&self, start: usize) -> usize {
+        let mut depth = 0usize;
+        for (i, (event, _)) in self.events.iter().enumerate().skip(start) {
+            match event {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.events.len()
+    }
+
+    /// The end (exclusive) of the run of inline events starting at
+    /// `start`, as the leaf collector groups them.
+    fn inline_run_end(&self, start: usize) -> usize {
+        let mut i = start;
+        while let Some((event, _)) = self.events.get(i) {
+            if !is_inline(event) {
+                break;
+            }
+            i = if matches!(event, Event::Start(_)) {
+                self.matching_end(i) + 1
+            } else {
+                i + 1
+            };
+        }
+        i
+    }
+
+    /// The change-tracking key of the block starting at event `i`: an
+    /// inline run's span, or the event's own range.
+    fn block_key(&self, i: usize) -> Option<Range<usize>> {
+        let (event, range) = self.events.get(i)?;
+        if matches!(event, Event::End(_)) {
+            return None;
+        }
+        if is_inline(event) {
+            let end = self.inline_run_end(i);
+            return Some(range.start..self.events[end - 1].1.end);
+        }
+        Some(range.clone())
+    }
+
+    fn render_paragraph(&mut self) {
+        let range = self.start_range();
+        let start = self.pos;
+        if let Some(tex) = self.take_display_math_paragraph() {
+            match self.change_attrs(&range, PlaceContext::Block) {
+                Some(change) => {
+                    self.write_open_tag("div", "", "", Some(&change));
+                    self.push_math_fence(&tex);
+                    self.out.push_str("</div>\n");
+                }
+                None => self.push_math_fence(&tex),
+            }
+            return;
+        }
+        self.open_tag("p", "", "", &range);
+        let spans = self
+            .container_spans(&range, start - 1)
+            .or_else(|| self.item_spans.take());
+        let active = self.activate(spans);
+        self.children();
+        if active {
+            self.finish_spans();
+        }
+        self.out.push_str("</p>\n");
+    }
+
+    /// A list item. Without change tracking this is `<li>` + children.
+    /// With it, `li` deletions keyed to the first child are emitted before
+    /// the `<li>`, a simple item's word spans are activated for its
+    /// content, and each inline run (a tight item's text has no
+    /// `Paragraph` of its own) is looked up as a leaf: a changed run in a
+    /// complex item is wrapped in `<span class="mud-change-ins" …>`.
+    fn render_item(&mut self) {
+        let range = self.start_range();
+        if self.changes.is_none() {
+            self.open_tag("li", "", "", &range);
+            self.children();
+            self.out.push_str("</li>\n");
+            return;
+        }
+        if let Some(first) = self.block_key(self.pos) {
+            let html = self
+                .changes
+                .as_mut()
+                .map(|c| c.placer.list_item_html(&first))
+                .unwrap_or_default();
+            self.out.push_str(&html);
+        }
+        self.open_tag("li", "", "", &range);
+        let mut item_spans = self.container_spans(&range, self.pos - 1);
+        loop {
+            match self.current() {
+                Some(Event::End(_)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => break,
+                Some(event) if is_inline(event) => {
+                    let spans = item_spans.take();
+                    self.render_inline_run(spans);
+                }
+                Some(Event::Start(Tag::Paragraph)) => {
+                    self.item_spans = item_spans.take();
+                    self.step();
+                    self.item_spans = None;
+                }
+                Some(_) => self.step(),
+            }
+        }
+        self.out.push_str("</li>\n");
+    }
+
+    /// An inline run directly under a list item (change tracking only).
+    fn render_inline_run(&mut self, item_spans: Option<Vec<WordSpan>>) {
+        let start = self.pos;
+        let end = self.inline_run_end(start);
+        let range = self.events[start].1.start..self.events[end - 1].1.end;
+        let change = self.change_attrs(&range, PlaceContext::Block);
+        if let Some(change) = &change {
+            self.write_open_tag("span", "", "", Some(change));
+        }
+        let spans = item_spans.or_else(|| self.block_spans(&range, start, end));
+        let active = self.activate(spans);
+        while self.pos < end {
+            self.step();
+        }
+        if active {
+            self.finish_spans();
+        }
+        if change.is_some() {
+            self.out.push_str("</span>");
+        }
+    }
+
     fn render_container(&mut self, tag: Tag<'a>) {
         match tag {
-            Tag::Paragraph => {
-                if let Some(tex) = self.take_display_math_paragraph() {
-                    self.push_math_fence(&tex);
-                } else {
-                    self.out.push_str("<p>");
-                    self.children();
-                    self.out.push_str("</p>\n");
-                }
-            }
+            Tag::Paragraph => self.render_paragraph(),
             Tag::Heading { level, .. } => {
+                let range = self.start_range();
+                let start = self.pos;
                 let plain = self.peek_plain_text(self.pos);
                 let slug = self.slugs.track(&plain);
-                self.out
-                    .push_str(&format!("<{level} id=\"{}\">", html_escape(&slug)));
+                let id = format!(" id=\"{}\"", html_escape(&slug));
+                self.open_tag(&level.to_string(), "", &id, &range);
+                let spans = self.container_spans(&range, start - 1);
+                let active = self.activate(spans);
                 self.children();
+                if active {
+                    self.finish_spans();
+                }
                 self.out.push_str(&format!("</{level}>\n"));
             }
             Tag::BlockQuote(_) => self.render_blockquote(),
             Tag::CodeBlock(kind) => self.render_code_block(kind),
             Tag::HtmlBlock => self.render_html_block(),
             Tag::List(start) => self.render_list(start),
-            Tag::Item => {
-                self.out.push_str("<li>");
-                self.children();
-                self.out.push_str("</li>\n");
-            }
+            Tag::Item => self.render_item(),
             Tag::Table(alignments) => self.render_table(alignments),
             Tag::TableHead => self.render_table_head(),
             Tag::TableRow => self.render_table_row(),
@@ -416,7 +749,14 @@ impl<'a> Renderer<'a> {
                 } else {
                     &s
                 };
-                self.out.push_str(&html_escape(&replace_shortcodes(s)));
+                self.emit_text(s);
+            }
+            Event::Code(s) if self.emitter.is_some() => {
+                // Word spans are never active in a math-bearing block, so
+                // no inline-math check is needed here.
+                self.out.push_str("<code>");
+                self.advance_spans(s.chars().count(), true);
+                self.out.push_str("</code>");
             }
             Event::Code(s) => {
                 // GitHub's inline-math form: a code span immediately
@@ -440,9 +780,24 @@ impl<'a> Renderer<'a> {
             Event::InlineHtml(s) => {
                 self.out.push_str(&sanitize_html(&s));
             }
-            Event::SoftBreak => self.out.push('\n'),
-            Event::HardBreak => self.out.push_str("<br />\n"),
-            Event::Rule => self.out.push_str("<hr />\n"),
+            Event::SoftBreak => {
+                self.advance_spans(1, false);
+                self.out.push('\n');
+            }
+            Event::HardBreak => {
+                self.advance_spans(1, false);
+                self.out.push_str("<br />\n");
+            }
+            Event::Rule => {
+                let range = self.events[self.pos - 1].1.clone();
+                match self.change_attrs(&range, PlaceContext::Block) {
+                    Some(change) => {
+                        self.write_open_tag("div", "", "", Some(&change));
+                        self.out.push_str("<hr /></div>\n");
+                    }
+                    None => self.out.push_str("<hr />\n"),
+                }
+            }
             Event::TaskListMarker(checked) => {
                 if checked {
                     self.out
@@ -483,25 +838,9 @@ impl<'a> Renderer<'a> {
         // as a link, failed to resolve one, and fell back to literal
         // text token-by-token) — so detection and stripping both work on
         // the whole leading run of `Text` events, not just the first one.
-        let first_line = match self.current() {
-            Some(Event::Start(Tag::Paragraph)) => {
-                let (text, _) = self.peek_leading_text_run(self.pos + 1);
-                Some(text)
-            }
-            _ => None,
-        };
-
-        if let Some(first_line) = &first_line {
-            if let Some((category, ())) = detect_gfm_alert(first_line) {
-                self.render_gfm_alert(category);
-                return;
-            }
-            if let Some((tag, byte_len)) = parse_aside_tag(first_line) {
-                if let Some(category) = detect_docc_aside(&tag, self.options.doc_c_alert_mode) {
-                    self.render_docc_alert(category, &tag, byte_len);
-                    return;
-                }
-            }
+        if let Some(alert) = self.detect_alert() {
+            self.render_alert_body(&alert, true);
+            return;
         }
 
         self.out.push_str("<blockquote>\n");
@@ -509,50 +848,83 @@ impl<'a> Renderer<'a> {
         self.out.push_str("</blockquote>\n");
     }
 
-    fn render_gfm_alert(&mut self, category: AlertCategory) {
-        let strip_len = gfm_tag_literal(category).len();
-        self.render_alert_body(alert_class(category), alert_title(category), strip_len);
-    }
-
-    fn render_docc_alert(&mut self, category: AlertCategory, tag: &str, byte_len: usize) {
-        let title = docc_display_name(tag);
-        self.render_alert_body(alert_class(category), &title, byte_len);
+    /// Detects a GFM alert or DocC aside opening at `self.pos` (a
+    /// blockquote's first child).
+    fn detect_alert(&self) -> Option<Alert> {
+        let first_line = match self.current() {
+            Some(Event::Start(Tag::Paragraph)) => self.peek_leading_text_run(self.pos + 1).0,
+            _ => return None,
+        };
+        if let Some((category, ())) = detect_gfm_alert(&first_line) {
+            return Some(Alert {
+                class: alert_class(category),
+                title: alert_title(category).to_string(),
+                strip_len: gfm_tag_literal(category).len(),
+                docc: false,
+            });
+        }
+        let (tag, byte_len) = parse_aside_tag(&first_line)?;
+        let category = detect_docc_aside(&tag, self.options.doc_c_alert_mode)?;
+        Some(Alert {
+            class: alert_class(category),
+            title: docc_display_name(&tag),
+            strip_len: byte_len,
+            docc: true,
+        })
     }
 
     /// Shared alert body renderer. `self.pos` must be at the blockquote's
     /// `Start(Paragraph)` with a leading `Text` child — verified by
-    /// `render_blockquote`'s peek. Strips `strip_len` bytes (the detected
-    /// tag, colon, and trailing whitespace) off that first text node, then
-    /// renders the rest of the paragraph and the remaining blockquote
-    /// content normally.
-    fn render_alert_body(&mut self, class: &str, title: &str, strip_len: usize) {
-        self.out
-            .push_str(&format!("<blockquote class=\"alert {class}\">\n"));
+    /// `detect_alert`. Strips `strip_len` bytes (the detected tag, colon,
+    /// and trailing whitespace) off that first text node, then renders the
+    /// rest of the paragraph and the remaining blockquote content
+    /// normally. `wrapper` false omits the `<blockquote>` tags (a deleted
+    /// alert, which the placer wraps itself).
+    ///
+    /// Change tracking keys an alert by its first paragraph, so its
+    /// attributes land on the `<blockquote>`. Only a DocC aside takes word
+    /// spans (as in `mud`), with the cursor skipping the `Kind:` prefix.
+    fn render_alert_body(&mut self, alert: &Alert, wrapper: bool) {
+        let para_start = self.pos;
+        let range = self.events[para_start].1.clone(); // the inner paragraph
+        if wrapper {
+            self.open_tag("blockquote", &format!("alert {}", alert.class), "", &range);
+            self.out.push('\n');
+        }
         self.out.push_str(&format!(
             "<p class=\"alert-title\">{}</p>\n",
-            html_escape(title)
+            html_escape(&alert.title)
         ));
+
+        let active = alert.docc && {
+            let spans = self.container_spans(&range, para_start);
+            self.activate(spans)
+        };
 
         self.pos += 1; // consume Start(Paragraph)
         let (first_text, after_leading_text) = self.peek_leading_text_run(self.pos);
         self.pos = after_leading_text; // consume the tag's leading Text run
 
         let remainder = first_text
-            .get(strip_len.min(first_text.len())..)
+            .get(alert.strip_len.min(first_text.len())..)
             .unwrap_or("")
             .trim_start_matches(' ');
+        if let Some(emitter) = self.emitter.as_mut() {
+            let prefix = first_text.len() - remainder.len();
+            emitter.skip_prefix(first_text[..prefix].chars().count());
+        }
 
         let mut opened = false;
         if !remainder.is_empty() {
             opened = true;
             self.out.push_str("<p>");
-            self.out
-                .push_str(&html_escape(&replace_shortcodes(remainder)));
+            self.emit_text(remainder);
         }
         // Skip the soft break separating the tag line from the rest of the
         // paragraph's content, if there is one.
         if matches!(self.current(), Some(Event::SoftBreak)) {
             self.pos += 1;
+            self.advance_spans(1, false);
         }
         let at_paragraph_end = matches!(self.current(), Some(Event::End(TagEnd::Paragraph)));
         if at_paragraph_end {
@@ -564,18 +936,25 @@ impl<'a> Renderer<'a> {
             }
             self.children(); // rest of the paragraph; consumes its End
         }
+        if active {
+            self.finish_spans();
+        }
         if opened {
             self.out.push_str("</p>\n");
         }
 
         self.children(); // remaining blockquote blocks; consumes End(BlockQuote)
-        self.out.push_str("</blockquote>\n");
+        if wrapper {
+            self.out.push_str("</blockquote>\n");
+        }
     }
 
     // MARK: - Code blocks and HTML blocks
 
-    fn render_code_block(&mut self, kind: CodeBlockKind<'a>) {
-        let lang = match &kind {
+    /// Consumes a code block's content through its `End`, returning the
+    /// language (the info string's first word) and the code.
+    fn take_code_block(&mut self, kind: &CodeBlockKind<'a>) -> (Option<String>, String) {
+        let lang = match kind {
             CodeBlockKind::Fenced(info) => {
                 let first_word = info.split(' ').next().unwrap_or("");
                 if first_word.is_empty() {
@@ -602,20 +981,112 @@ impl<'a> Renderer<'a> {
                 None => break,
             }
         }
+        (lang, code)
+    }
 
+    /// `<code[ class="language-…"]>` — a code block's opening inner tag.
+    fn push_code_open(&mut self, lang: Option<&str>) {
         match lang {
             Some(lang) => {
-                self.out.push_str("<pre><code class=\"language-");
-                self.out.push_str(&html_escape(&lang));
+                self.out.push_str("<code class=\"language-");
+                self.out.push_str(&html_escape(lang));
                 self.out.push_str("\">");
             }
-            None => self.out.push_str("<pre><code>"),
+            None => self.out.push_str("<code>"),
         }
-        self.out.push_str(&html_escape(&code));
+    }
+
+    /// A code block's inner HTML: `<code …>escaped</code>`.
+    fn push_code_inner(&mut self, lang: Option<&str>, code: &str) {
+        self.push_code_open(lang);
+        self.out.push_str(&html_escape(code));
+        self.out.push_str("</code>");
+    }
+
+    fn render_code_block(&mut self, kind: CodeBlockKind<'a>) {
+        let range = self.start_range();
+        let (lang, code) = self.take_code_block(&kind);
+        if self.changes.is_none() {
+            self.open_tag("pre", "", "", &range);
+            self.push_code_inner(lang.as_deref(), &code);
+            self.out.push_str("</pre>\n");
+            return;
+        }
+
+        let change = self.change_attrs(&range, PlaceContext::Block);
+        if let Some(lines) = self
+            .changes
+            .as_ref()
+            .and_then(|c| c.code_diff(&range))
+            .map(<[_]>::to_vec)
+        {
+            self.push_code_diff(lang.as_deref(), &lines);
+            return;
+        }
+        match change {
+            // Mermaid and math blocks are swapped out wholesale by their
+            // client-side renderers, which would drop attributes on the
+            // `<pre>`: carry them on a wrapper instead.
+            Some(change) if lang.as_deref().is_some_and(is_diagram_language) => {
+                self.write_open_tag("div", "", "", Some(&change));
+                self.out.push_str("<pre>");
+                self.push_code_inner(lang.as_deref(), &code);
+                self.out.push_str("</pre>\n</div>\n");
+            }
+            change => {
+                self.write_open_tag("pre", "", "", change.as_ref());
+                self.push_code_inner(lang.as_deref(), &code);
+                self.out.push_str("</pre>\n");
+            }
+        }
+    }
+
+    /// A paired code block's line diff: one `<span class="cl …">` per line
+    /// (unchanged, `cl-del`, or `cl-ins`), each holding the escaped line
+    /// with word-level `<del>`/`<ins>` and its trailing newline. The
+    /// `<pre>` itself carries no change ID; the line spans own them.
+    fn push_code_diff(&mut self, lang: Option<&str>, lines: &[mudl_diff::code::CodeLine]) {
+        self.out.push_str("<pre class=\"mud-code-diff\">");
+        self.push_code_open(lang);
+        for line in lines {
+            let (class, mark) = match line.annotation {
+                LineAnnotation::Unchanged => ("cl", ""),
+                LineAnnotation::Inserted => ("cl cl-ins", "ins"),
+                LineAnnotation::Deleted => ("cl cl-del", "del"),
+            };
+            let data = self
+                .changes
+                .as_ref()
+                .map(|c| c.code_line_data(line))
+                .unwrap_or_default();
+            self.out
+                .push_str(&format!("<span class=\"{class}\"{data}>"));
+            let mut at = 0;
+            for range in &line.word_ranges {
+                let (start, end) = (
+                    range.start.min(line.text.len()),
+                    range.end.min(line.text.len()),
+                );
+                if start < at
+                    || !line.text.is_char_boundary(start)
+                    || !line.text.is_char_boundary(end)
+                {
+                    continue;
+                }
+                self.out.push_str(&html_escape(&line.text[at..start]));
+                self.out.push_str(&format!(
+                    "<{mark}>{}</{mark}>",
+                    html_escape(&line.text[start..end])
+                ));
+                at = end;
+            }
+            self.out.push_str(&html_escape(&line.text[at..]));
+            self.out.push_str("\n</span>");
+        }
         self.out.push_str("</code></pre>\n");
     }
 
-    fn render_html_block(&mut self) {
+    fn take_html_block(&mut self) -> String {
         let mut block = String::new();
         loop {
             match self.current() {
@@ -631,7 +1102,20 @@ impl<'a> Renderer<'a> {
                 None => break,
             }
         }
-        self.out.push_str(&sanitize_html(&block));
+        block
+    }
+
+    fn render_html_block(&mut self) {
+        let range = self.start_range();
+        let block = self.take_html_block();
+        match self.change_attrs(&range, PlaceContext::Block) {
+            Some(change) => {
+                self.write_open_tag("div", "mud-html-block", "", Some(&change));
+                self.out.push_str(&sanitize_html(&block));
+                self.out.push_str("</div>\n");
+            }
+            None => self.out.push_str(&sanitize_html(&block)),
+        }
     }
 
     // MARK: - Lists
@@ -651,8 +1135,25 @@ impl<'a> Renderer<'a> {
 
     // MARK: - Tables
 
+    /// Runs `f` on the placer, appending what it returns (change tracking
+    /// only).
+    fn place(&mut self, f: impl FnOnce(&mut crate::changes::placer::Placer) -> String) {
+        if let Some(changes) = self.changes.as_mut() {
+            let html = f(&mut changes.placer);
+            self.out.push_str(&html);
+        }
+    }
+
     fn render_table(&mut self, alignments: Vec<Alignment>) {
         self.table_alignments = alignments;
+
+        // Deletions keyed to the head are hoisted above the table, so
+        // they don't become invalid children of `<table>`.
+        if let Some(Event::Start(Tag::TableHead)) = self.current() {
+            let head = self.events[self.pos].1.clone();
+            self.place(|p| p.hoisted_html(&head));
+        }
+
         self.out.push_str("<table>\n");
 
         // A GFM table always has exactly one header row.
@@ -662,8 +1163,15 @@ impl<'a> Renderer<'a> {
 
         if matches!(self.current(), Some(Event::Start(Tag::TableRow))) {
             self.out.push_str("<tbody>\n");
+            let mut last_row = None;
             while matches!(self.current(), Some(Event::Start(Tag::TableRow))) {
+                let row = self.events[self.pos].1.clone();
+                self.place(|p| p.row_html(&row));
                 self.step();
+                last_row = Some(row);
+            }
+            if let Some(row) = last_row {
+                self.place(|p| p.reclaimed_row_html(&row));
             }
             self.out.push_str("</tbody>\n");
         }
@@ -673,20 +1181,26 @@ impl<'a> Renderer<'a> {
         }
         self.out.push_str("</table>\n");
         self.table_alignments.clear();
+        self.place(|p| p.deferred_html());
     }
 
     fn render_table_head(&mut self) {
+        let range = self.start_range();
         self.in_table_head = true;
         self.cell_index = 0;
-        self.out.push_str("<thead>\n<tr>\n");
+        self.out.push_str("<thead>\n");
+        self.open_tag("tr", "", "", &range);
+        self.out.push('\n');
         self.children();
         self.out.push_str("</tr>\n</thead>\n");
         self.in_table_head = false;
     }
 
     fn render_table_row(&mut self) {
+        let range = self.start_range();
         self.cell_index = 0;
-        self.out.push_str("<tr>\n");
+        self.open_tag("tr", "", "", &range);
+        self.out.push('\n');
         self.children();
         self.out.push_str("</tr>\n");
     }
@@ -744,6 +1258,8 @@ impl<'a> Renderer<'a> {
         // (no emoji-shortcode replacement, matching `mud`'s `image.plainText`
         // used verbatim for the `alt` attribute).
         let alt = self.collect_plain_text();
+        // The leaf collector counts alt text into the inline stream.
+        self.advance_spans(alt.chars().count(), false);
         self.out.push_str("<img src=\"");
         self.out.push_str(&html_escape(dest_url));
         self.out.push_str("\" alt=\"");
@@ -768,7 +1284,10 @@ impl<'a> Renderer<'a> {
     /// map at all, hence the `is_comment_label` check first.
     fn render_footnote_reference(&mut self, label: &str) {
         let escaped = html_escape(label);
-        if is_comment_label(label) {
+        if is_comment_label(label) && self.is_deletion_render {
+            // A deleted copy of a block emits no comment marker: the
+            // surviving block's marker must stay the only anchor.
+        } else if is_comment_label(label) {
             self.out.push_str(&format!(
                 "<a class=\"mud-comment-marker\" id=\"cmtref-{escaped}\" href=\"#cmt-{escaped}\">\u{1F4AC}</a>"
             ));
@@ -779,6 +1298,220 @@ impl<'a> Renderer<'a> {
             self.out.push_str(&format!(
                 "<sup class=\"footnote-ref\" id=\"fnref-{escaped}\"><a href=\"#fn-{escaped}\">{number}</a></sup>"
             ));
+        }
+    }
+}
+
+/// A detected GFM alert or DocC aside, ready to render.
+struct Alert {
+    class: &'static str,
+    title: String,
+    /// Bytes of the tag prefix to strip off the first text run.
+    strip_len: usize,
+    /// A DocC aside (only those take word spans).
+    docc: bool,
+}
+
+/// Mermaid and math fences, which client-side renderers replace wholesale.
+fn is_diagram_language(lang: &str) -> bool {
+    lang.eq_ignore_ascii_case("mermaid") || lang.eq_ignore_ascii_case("math")
+}
+
+/// True when `events` hold a `` $`…`$ `` inline-math span: a code span
+/// between a text ending in `$` and a text starting with `$` (the same
+/// shape `render_leaf`'s `Code` arm turns into math).
+fn contains_inline_math(events: &[(Event, Range<usize>)]) -> bool {
+    events.windows(3).any(|w| {
+        matches!(&w[0].0, Event::Text(t) if t.ends_with('$'))
+            && matches!(w[1].0, Event::Code(_))
+            && matches!(&w[2].0, Event::Text(t) if t.starts_with('$'))
+    })
+}
+
+// MARK: - Deleted blocks
+
+/// A deleted block rendered from the old document: its native element,
+/// inner HTML, and any classes that precede `mud-change-del`.
+pub(crate) struct DeletionBody {
+    pub tag: String,
+    pub html: String,
+    pub extra_class: Option<String>,
+}
+
+/// Renders the deleted leaf `leaf` of the old document `old`
+/// (`DeletionRenderer.swift`): the renderer runs over the old document's
+/// own events for that block, seeded with the old document's footnote
+/// numbering, with comment markers suppressed. `spans` (a paired
+/// deletion's significant word spans) mark deleted words with `<del>`.
+///
+/// - A deleted Mermaid block shows `<code><em>[revised diagram]</em></code>`.
+/// - Display math (```` ```math ````, `$$…$$`) renders as math inside a
+///   `<div>`, never with word spans.
+/// - An alert's first paragraph renders the whole alert (title included)
+///   as a `<blockquote class="alert …">`.
+pub(crate) fn render_deletion(
+    old: &ParsedMarkdown,
+    numbers: &HashMap<String, u32>,
+    options: &RenderOptions,
+    leaf: &LeafBlock,
+    spans: Option<&[WordSpan]>,
+) -> DeletionBody {
+    let mut r = Renderer::new(&old.events, options, numbers);
+    r.is_deletion_render = true;
+    let body = |tag: &str, html: String| DeletionBody {
+        tag: tag.to_string(),
+        html,
+        extra_class: None,
+    };
+
+    let Some(i) = locate_leaf(&old.events, leaf) else {
+        // A synthesised inline-run paragraph (no `Start` of its own), or
+        // a leaf the parse no longer yields: render the run, else the
+        // escaped source.
+        let run = old
+            .events
+            .iter()
+            .position(|(event, range)| range.start == leaf.byte_range.start && is_inline(event));
+        let Some(start) = run else {
+            return body("p", html_escape(&leaf.source_text));
+        };
+        let end = r.inline_run_end(start);
+        r.pos = start;
+        r.start_deletion_spans(spans, start, end);
+        while r.pos < end {
+            r.step();
+        }
+        r.finish_spans();
+        return body("p", r.out);
+    };
+
+    let end = r.matching_end(i);
+    let event = old.events[i].0.clone();
+    match (leaf.tag, event) {
+        (_, Event::Rule) => body("hr", String::new()),
+        (_, Event::Start(Tag::HtmlBlock)) => {
+            r.pos = i + 1;
+            let block = r.take_html_block();
+            DeletionBody {
+                tag: "div".to_string(),
+                html: sanitize_html(&block),
+                extra_class: Some("mud-html-block".to_string()),
+            }
+        }
+        (_, Event::Start(Tag::CodeBlock(kind))) => {
+            r.pos = i + 1;
+            let (lang, code) = r.take_code_block(&kind);
+            match lang.as_deref() {
+                Some(l) if l.eq_ignore_ascii_case("mermaid") => {
+                    body("pre", "<code><em>[revised diagram]</em></code>".to_string())
+                }
+                Some(l) if is_diagram_language(l) => {
+                    r.out.push_str("<pre>");
+                    r.push_code_inner(lang.as_deref(), &code);
+                    r.out.push_str("</pre>\n");
+                    body("div", r.out)
+                }
+                _ => {
+                    r.push_code_inner(lang.as_deref(), &code);
+                    body("pre", r.out)
+                }
+            }
+        }
+        (_, Event::Start(Tag::Paragraph)) if is_display_math(&old.events[i + 1..end]) => {
+            r.pos = i + 1;
+            if let Some(tex) = r.take_display_math_paragraph() {
+                r.push_math_fence(&tex);
+            }
+            body("div", r.out)
+        }
+        (_, Event::Start(Tag::Paragraph))
+            if i > 0 && matches!(old.events[i - 1].0, Event::Start(Tag::BlockQuote(_))) =>
+        {
+            r.pos = i;
+            match r.detect_alert() {
+                Some(alert) => {
+                    if alert.docc {
+                        r.start_deletion_spans(spans, i + 1, end);
+                    }
+                    r.out.push('\n'); // as after an inserted alert's open tag
+                    r.render_alert_body(&alert, false);
+                    r.finish_spans();
+                    DeletionBody {
+                        tag: "blockquote".to_string(),
+                        html: r.out,
+                        extra_class: Some(format!("alert {}", alert.class)),
+                    }
+                }
+                None => r.render_deletion_children(i, end, spans, "p"),
+            }
+        }
+        (LeafTag::Heading(level), _) => {
+            r.render_deletion_children(i, end, spans, &format!("h{level}"))
+        }
+        (_, Event::Start(Tag::Item)) => r.render_deletion_children(i, end, spans, "li"),
+        (_, Event::Start(Tag::TableHead)) => {
+            r.in_table_head = true;
+            r.out.push('\n');
+            r.render_deletion_children(i, end, spans, "tr")
+        }
+        (_, Event::Start(Tag::TableRow)) => {
+            r.out.push('\n');
+            r.render_deletion_children(i, end, spans, "tr")
+        }
+        _ => r.render_deletion_children(i, end, spans, "p"),
+    }
+}
+
+/// The index of `leaf`'s own `Start` (or `Rule`) event: the event whose
+/// range is the leaf's and whose kind matches its tag (a one-item list
+/// shares its item's range).
+fn locate_leaf(events: &[(Event, Range<usize>)], leaf: &LeafBlock) -> Option<usize> {
+    events.iter().position(|(event, range)| {
+        *range == leaf.byte_range
+            && matches!(
+                (leaf.tag, event),
+                (LeafTag::Paragraph, Event::Start(Tag::Paragraph))
+                    | (LeafTag::Heading(_), Event::Start(Tag::Heading { .. }))
+                    | (LeafTag::ListItem, Event::Start(Tag::Item))
+                    | (LeafTag::TableRow, Event::Start(Tag::TableRow))
+                    | (LeafTag::TableHead, Event::Start(Tag::TableHead))
+                    | (LeafTag::CodeBlock, Event::Start(Tag::CodeBlock(_)))
+                    | (LeafTag::HtmlBlock, Event::Start(Tag::HtmlBlock))
+                    | (LeafTag::ThematicBreak, Event::Rule)
+            )
+    })
+}
+
+impl Renderer<'_> {
+    /// Starts a deletion-role cursor for the block whose inline events
+    /// are `lo..hi`, unless there are no spans or the block holds math.
+    fn start_deletion_spans(&mut self, spans: Option<&[WordSpan]>, lo: usize, hi: usize) {
+        let Some(spans) = spans.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if contains_inline_math(&self.events[lo..hi.min(self.events.len())]) {
+            return;
+        }
+        self.emitter = Some(WordSpanEmitter::new(spans.to_vec(), Role::Deletion, false));
+    }
+
+    /// Renders the children of the `Start` at `i` (through its `End` at
+    /// `end`) as a deletion's inner HTML, with deletion-role word spans.
+    fn render_deletion_children(
+        mut self,
+        i: usize,
+        end: usize,
+        spans: Option<&[WordSpan]>,
+        tag: &str,
+    ) -> DeletionBody {
+        self.start_deletion_spans(spans, i + 1, end);
+        self.pos = i + 1;
+        self.children();
+        self.finish_spans();
+        DeletionBody {
+            tag: tag.to_string(),
+            html: self.out,
+            extra_class: None,
         }
     }
 }
@@ -1578,5 +2311,110 @@ mod down_tests {
             render("&amp;"),
             "<div class=\"line\" data-line=\"1\">&amp;amp;</div>"
         );
+    }
+}
+
+#[cfg(test)]
+mod change_placement_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::changes::Waypoint;
+
+    /// Every deletion must be emitted by a keyed lookup during the walk;
+    /// none may depend on `trailing_html`'s defensive sweep.
+    fn unplaced(old: &str, new: &str) -> Vec<String> {
+        let options = RenderOptions {
+            waypoint: Some(Waypoint {
+                old_markdown: Arc::from(old),
+                show_inline_deletions: true,
+                word_diff_threshold_pct: 25,
+            }),
+            ..RenderOptions::default()
+        };
+        let body = crate::changes::body(new);
+        let parsed = ParsedMarkdown::new(&body);
+        let numbers = number_footnotes(&parsed.events);
+        let mut renderer = Renderer::new(&parsed.events, &options, &numbers);
+        renderer.changes = UpChanges::build(options.waypoint.as_ref().unwrap(), new, &options);
+        renderer.run();
+        renderer
+            .changes
+            .map(|c| c.placer.unplaced().into_iter().map(String::from).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn every_deletion_is_placed_by_the_walk() {
+        let cases = [
+            ("Alpha.\n\nGone.\n", "Alpha.\n"),
+            ("Gone.\n\nKeep.\n", "Keep.\n"),
+            ("- A\n- B\n- C\n", "- A\n- C\n"),
+            ("1. A\n2. B\n3. C\n   - x\n", "1. A\n3. C\n   - x\n"),
+            ("- A\n- B\n  - x\n", "- A\n- B edited\n  - x\n"),
+            ("- A\n- B\n\nAfter.\n", "- A\n\nAfter.\n"),
+            (
+                "| A |\n|---|\n| 1 |\n| 2 |\n| 3 |\n",
+                "| A |\n|---|\n| 1 |\n| 3 |\n",
+            ),
+            ("| A |\n|---|\n| 1 |\n| 2 |\n", "| A |\n|---|\n| 1 |\n"),
+            (
+                "Intro.\n\n| A |\n|---|\n| 1 |\n\nTail.\n",
+                "Intro.\n\nTail.\n",
+            ),
+            ("Gone.\n\n| A |\n|---|\n| 1 |\n", "| A |\n|---|\n| 1 |\n"),
+            (
+                "| A |\n|---|\n| 1 |\n\nGone.\n\nKeep.\n",
+                "| A |\n|---|\n| 1 |\n| 2 |\n\nKeep.\n",
+            ),
+            (
+                "> [!NOTE]\n> Old.\n\nKeep.\n",
+                "> [!NOTE]\n> New text.\n\nKeep.\n",
+            ),
+            ("> Status: Planning\n", "> Status: Underway\n"),
+            ("Gone.\n\n```\nkeep\nold\n```\n", "```\nkeep\nnew\n```\n"),
+            ("Alpha.\n\n---\n\nBeta.\n", "Alpha.\n\nBeta.\n"),
+            ("Keep.\n\n<div>\nraw\n</div>\n\nTail.\n", "Keep.\n\nTail.\n"),
+            ("- [ ] a\n\n  para\n- b\n", "- b\n"),
+            (
+                "Intro.\n\n$$ x = 1 $$\n\nTail.\n",
+                "Intro.\n\n$$ x = 2 $$\n\nTail.\n",
+            ),
+        ];
+        for (old, new) in cases {
+            assert_eq!(
+                unplaced(old, new),
+                Vec::<String>::new(),
+                "{old:?} -> {new:?}"
+            );
+        }
+    }
+
+    /// The same over mechanically edited `docs/examples` documents.
+    #[test]
+    fn every_deletion_is_placed_in_real_documents() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples");
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|x| x != "md") {
+                continue;
+            }
+            let md = std::fs::read_to_string(&path).unwrap();
+            let edited: Vec<String> = md
+                .lines()
+                .enumerate()
+                .filter(|(i, _)| i % 7 != 6)
+                .map(|(i, line)| {
+                    if i % 4 == 3 && !line.trim().is_empty() {
+                        format!("{line} edited")
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect();
+            let edited = edited.join("\n");
+            assert_eq!(unplaced(&md, &edited), Vec::<String>::new(), "{path:?}");
+            assert_eq!(unplaced(&edited, &md), Vec::<String>::new(), "{path:?}");
+        }
     }
 }

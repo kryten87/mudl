@@ -1,0 +1,280 @@
+/* mudl - change tracking styles (Up and Down mode). Ported from `mud`'s
+   mud-changes.css. Included only when the body carries change markup
+   (`select_assets`), so none of this reaches an export. */
+
+/* -- Accent colors for change types --------------------------------------- */
+
+/* Light/dark follows `prefers-color-scheme`, like mud.css and the themes: the
+   GUI's Lighting setting drives the WebView's color scheme, not a class. */
+
+:root {
+  --change-ins: #1a7f37;
+  --change-del: #cf222e;
+  --change-mix: #e89530;
+  --change-ins-ln: #aceebb;
+  --change-del-ln: #ffcecb;
+  --change-ins-word: #c3f3ce;
+  --change-del-word: #ffcecb;
+  --change-ins-tint: color-mix(in srgb, var(--change-ins) 10%, white);
+  --change-del-tint: color-mix(in srgb, var(--change-del) 10%, white);
+  --change-mix-tint: color-mix(in srgb, var(--change-mix) 10%, white);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --change-ins: #3fb950;
+    --change-del: #f85149;
+    --change-mix: #d29922;
+    --change-ins-ln: #12572f;
+    --change-del-ln: #490400;
+    --change-ins-word: color-mix(in srgb, var(--change-ins) 45%, transparent);
+    --change-del-word: color-mix(in srgb, var(--change-del) 45%, transparent);
+    --change-ins-tint: color-mix(in srgb, var(--change-ins) 10%, black);
+    --change-del-tint: color-mix(in srgb, var(--change-del) 10%, black);
+    --change-mix-tint: color-mix(in srgb, var(--change-mix) 10%, black);
+  }
+}
+
+
+/* -- Up mode: overlay positioning ----------------------------------------- */
+
+.up-mode-output {
+  position: relative;
+}
+
+/* JS-positioned overlay: one per change group. Sits above the content and
+   blends with it, so the text stays readable. */
+.mud-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  border: 1px solid;
+  border-left: 0;
+  border-right: 0;
+  mix-blend-mode: multiply;
+  transition: opacity 0.15s ease-out;
+}
+
+.mud-overlay-ins { background: var(--change-ins-tint); color: var(--change-ins); }
+.mud-overlay-mix { background: var(--change-mix-tint); color: var(--change-mix); }
+.mud-overlay-del { background: var(--change-del-tint); color: var(--change-del); }
+
+@media (prefers-color-scheme: dark) {
+  .mud-overlay { mix-blend-mode: screen; }
+}
+
+
+/* -- Up mode: expando buttons --------------------------------------------- */
+
+.mud-expando {
+  position: absolute;
+  top: -1px;
+  right: 0.75em;
+  min-width: 1.5em;
+  height: 1.5em;
+  padding: 0.2em;
+  white-space: nowrap;
+  box-sizing: content-box;
+  border: 2px solid;
+  border-radius: 1.6em;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.7em;
+  line-height: 1;
+  color: var(--bg-color);
+  background-color: var(--change-mix);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translateY(-50%);
+  transform-origin: center;
+}
+
+.mud-overlay-ins > .mud-expando { background-color: var(--change-ins); }
+.mud-overlay-del > .mud-expando { background-color: var(--change-del); }
+
+.mud-expando:disabled {
+  cursor: default;
+}
+
+.mud-expando.mud-expando-expanded {
+  background-color: var(--bg-color);
+  border-width: 1.5px;
+}
+.mud-overlay-ins .mud-expando-expanded { color: var(--change-ins); }
+.mud-overlay-mix .mud-expando-expanded { color: var(--change-mix); }
+.mud-overlay-del .mud-expando-expanded { color: var(--change-del); }
+
+
+/* -- Up mode: collapsed del-only overlays --------------------------------- */
+
+.mud-overlay-collapsed {
+  height: 0px !important;
+  border-bottom: 0;
+  overflow: visible;
+}
+
+
+/* -- Up mode: deletions --------------------------------------------------- */
+
+.mud-change-del { display: none; }
+
+.mud-change-del.mud-change-revealed {
+  display: revert;
+  position: relative;
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--change-del) 50%, transparent);
+  text-decoration-thickness: 1.5px;
+}
+
+/* Deleted table rows and list items with no surviving sibling come wrapped in
+   a `<table><tbody>` / `<ul>` / `<ol>` of their own (as does a whole deleted
+   list). While every row or item in it is a hidden deletion, hide the wrapper
+   too, so its margin and borders don't leave a gap. The specificity beats
+   mud-up.css's `display: block` for content tables. */
+.up-mode-output table:not(:has(tr:not(.mud-change-del), .mud-change-revealed)),
+.up-mode-output :is(ul, ol):not(:has(> li:not(.mud-change-del), > li.mud-change-revealed)) {
+  display: none;
+}
+
+
+/* -- Up mode: code block line diffs --------------------------------------- */
+
+/* `.cl` is a structural wrapper (one per line); only the changed lines are
+   styled. */
+
+.cl.cl-del {
+  display: none;
+}
+
+.cl.cl-del.mud-change-revealed {
+  display: inline;
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--change-del) 50%, transparent);
+  text-decoration-thickness: 1.5px;
+  opacity: 0.75;
+}
+
+.cl.cl-ins {
+  background: color-mix(in srgb, var(--change-ins) 12%, transparent);
+}
+
+
+/* -- Up mode: active highlight -------------------------------------------- */
+
+.mud-overlay-cont {
+  border-bottom: 0;
+}
+
+.mud-overlay-cont + .mud-overlay-cont,
+.mud-overlay-cont + .mud-overlay-tail {
+  border-top-style: dashed;
+}
+
+.mud-expando.mud-change-active {
+  animation: expando-ripple 0.8s cubic-bezier(0.18, 0.89, 0.32, 1.15);
+}
+
+@keyframes expando-ripple {
+  0%   { transform: translateY(-50%) scale(1); }
+  40%  { transform: translateY(-50%) scale(1.5); }
+  70%  { transform: translateY(-50%) scale(0.8); }
+  100% { transform: translateY(-50%) scale(1); }
+}
+
+
+/* -- Down mode ------------------------------------------------------------ */
+
+/* mudl's Down rows are single `.line` elements with the number drawn by
+   `::before` (mud-down.css), where `mud` has `.ln` / `.lc` cells. The gutter
+   (`::before`) takes the strong line color, and a `::after` layer behind the
+   text takes the row tint. Both stop short of the first row's top padding and
+   the last row's bottom clearance. `z-index: 0` makes the row its own stacking
+   context so the tint layer sits above the page background but under the
+   text. */
+
+.line.dl-ins,
+.line.dl-del {
+  z-index: 0;
+}
+
+.line.dl-ins::before,
+.line.dl-del::before {
+  bottom: 0;
+}
+
+.line.dl-ins::after,
+.line.dl-del::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.line.dl-ins:first-child::after,
+.line.dl-del:first-child::after {
+  top: 2rem;
+}
+
+.line.dl-ins:last-child::before,
+.line.dl-del:last-child::before,
+.line.dl-ins:last-child::after,
+.line.dl-del:last-child::after {
+  bottom: 6rem;
+}
+
+.line.dl-ins::before {
+  color: var(--change-ins);
+  background-color: var(--change-ins-ln);
+}
+
+.line.dl-ins::after {
+  background: color-mix(in srgb, var(--change-ins) 10%, transparent);
+}
+
+/* A deleted row has no line in the current file, so it has no `data-line`
+   and takes no number: it doesn't advance the counter and shows an en dash. */
+.line.dl-del::before {
+  counter-increment: none;
+  content: "\2013";
+  color: var(--change-del);
+  background-color: var(--change-del-ln);
+}
+
+.line.dl-del::after {
+  background: color-mix(in srgb, var(--change-del) 10%, transparent);
+}
+
+.line.dl-del {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--change-del) 40%, transparent);
+  text-decoration-thickness: 1.5px;
+}
+
+
+/* -- Word-level inline markers -------------------------------------------- */
+
+[data-change-id] ins {
+  text-decoration: none;
+  background: var(--change-ins-word);
+}
+
+[data-change-id] del {
+  text-decoration: line-through;
+  text-decoration-color: var(--change-del);
+  background: var(--change-del-word);
+}
+
+/* When a mixed group is revealed (red and green side by side), hide the
+   inline <del> context words in the insertion block — the full deletion is
+   visible in its own block. */
+.mud-change-ins.mud-change-revealed del {
+  display: none;
+}

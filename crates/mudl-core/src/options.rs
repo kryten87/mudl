@@ -1,4 +1,5 @@
 use crate::alerts::DocCAlertMode;
+use crate::changes::Waypoint;
 
 /// Rendering configuration shared by `render_up` and `render_down`.
 ///
@@ -21,6 +22,11 @@ pub struct RenderOptions {
     /// as the Find-feature CSS (see `template::select_assets`). Defaults to
     /// `false`, matching `mud`'s `RenderOptions.standalone` default.
     pub standalone: bool,
+
+    /// The snapshot to draw changes against (`_working/DIFF-IMPLEMENTATION.md`
+    /// §9). `None` renders exactly as without change tracking; so does a
+    /// waypoint whose text has no changes. Exports never set it.
+    pub waypoint: Option<Waypoint>,
 }
 
 #[cfg(test)]
@@ -38,5 +44,10 @@ mod tests {
     #[test]
     fn default_standalone_is_false() {
         assert!(!RenderOptions::default().standalone);
+    }
+
+    #[test]
+    fn default_waypoint_is_none() {
+        assert!(RenderOptions::default().waypoint.is_none());
     }
 }

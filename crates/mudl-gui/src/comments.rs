@@ -86,7 +86,7 @@ pub fn build(ctx: &Context) -> gtk::Box {
 /// clearing it — the next successful refresh (the file watcher's own
 /// reload will trigger one indirectly, since the user sees the WebView
 /// update) catches up.
-fn refresh_list(ctx: &Context) {
+pub(crate) fn refresh_list(ctx: &Context) {
     let Ok(markdown) = std::fs::read_to_string(&ctx.path) else {
         return;
     };

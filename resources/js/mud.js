@@ -212,12 +212,13 @@
     el.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  // Down mode rows carry their source line number as `data-line`; a deleted
+  // row shown by change tracking has none, so counting rows would drift.
   function scrollToLine(lineNumber) {
-    var lines = document.querySelectorAll(".down-lines .dl");
-    var idx = lineNumber - 1;
-    if (idx >= 0 && idx < lines.length) {
-      lines[idx].scrollIntoView({ behavior: "smooth", block: "start" });
-    }
+    var line = document.querySelector(
+      '.down-mode-output .line[data-line="' + (lineNumber | 0) + '"]'
+    );
+    if (line) line.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   // -- Body classes ---------------------------------------------------------
