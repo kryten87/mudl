@@ -1,6 +1,6 @@
 [package]
 name = "mudl-diff"
-version = "1.0.3"
+version = "1.0.4"
 edition.workspace = true
 
 # Deliberately dependency-free (docs/IMPLEMENTATION-PLAN.md §3): the diff
