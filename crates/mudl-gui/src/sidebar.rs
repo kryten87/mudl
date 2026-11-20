@@ -37,7 +37,26 @@ pub fn build_outline_tree_view(nodes: &[OutlineNode]) -> gtk::TreeView {
     gtk::prelude::CellLayoutExt::add_attribute(&column, &renderer, "text", COLUMN_LABEL as i32);
     tree_view.append_column(&column);
 
+    expand_top_level(&tree_view, &store);
+
     tree_view
+}
+
+/// Expands each top-level row (without recursing), so a freshly opened
+/// document shows its first two heading levels rather than just the top
+/// one — which for a typical single-`#`-title document is one row.
+fn expand_top_level(tree_view: &gtk::TreeView, store: &gtk::TreeStore) {
+    let Some(iter) = store.iter_first() else {
+        return;
+    };
+    loop {
+        if let Some(path) = store.path(&iter) {
+            tree_view.expand_row(&path, false);
+        }
+        if !store.iter_next(&iter) {
+            break;
+        }
+    }
 }
 
 fn insert_nodes(store: &gtk::TreeStore, parent: Option<&gtk::TreeIter>, nodes: &[OutlineNode]) {
